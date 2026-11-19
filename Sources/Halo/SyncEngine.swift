@@ -69,6 +69,12 @@ enum MusicStyle: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum SpectrumMotion: String, Codable, CaseIterable, Identifiable {
+    case off, flow, beat
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+}
+
 /// Colors used by the Spectrum and Pulse music styles, as gradient stops from bass to treble.
 enum MusicPalette: String, Codable, CaseIterable, Identifiable {
     case rainbow, fire, ocean, neon, sunset, forest, ice, custom
@@ -119,6 +125,8 @@ struct EngineConfig: Equatable {
     var palette = MusicPalette.rainbow.stops(customFrom: .black, customTo: .black)
     /// Party style: short white flashes on big hits.
     var strobe = false
+    /// Spectrum style: how the palette moves along the strip over time.
+    var spectrumMotion: SpectrumMotion = .beat
     /// Hold music frames back by this much so they line up with speakers that play late (Bluetooth).
     var lightDelayMs = 0.0
 }
@@ -155,6 +163,11 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     private var hue = 0.0
     private var musicFade: [Double] = []
     // Party style state (q only)
+    // Spectrum color motion state (q only)
+    private var spectrumOffset = 0.0
+    private var spectrumTarget = 0.0
+    private var spectrumSeenBeat = 0
+    private var spectrumBeats = 0
     private var partySeenBeat = 0
     private var partyBeats = 0
     private var partyPattern = 0
@@ -426,15 +439,20 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
         let n = max(1, config.layout.total)
         switch style {
         case .spectrum:
-            // Bass at LED 1 (bottom-left) through treble at the last LED, colored along the palette.
+            // Bass at LED 1 (bottom-left) through treble at the last LED, colored along the palette,
+            // which can move along the strip over time (see `advanceSpectrumMotion`).
+            advanceSpectrumMotion()
             let bands = audio.bands
             let stops = config.palette
+            let offset = spectrumOffset
             return (0 ..< n).map { i in
                 let p = n > 1 ? Double(i) / Double(n - 1) : 0
                 let f = p * Double(bands.count - 1)
                 let lo = Int(f), hi = min(lo + 1, bands.count - 1)
                 let level = pow(bands[lo] + (bands[hi] - bands[lo]) * (f - Double(lo)), 1.4)
-                let c = MusicPalette.sample(stops, p)
+                // Mirrored wrap (period 2): equals p when offset is 0 and never jumps from the last color to the first.
+                let y = ((p + offset) / 2).truncatingRemainder(dividingBy: 1)
+                let c = MusicPalette.sample(stops, 1 - abs(1 - 2 * y))
                 return scaled(c, level)
             }
         case .pulse:
@@ -454,6 +472,27 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             let level = 0.2 + 0.8 * max(audio.beat, audio.loudness)
             return screenColors(scale: level) ?? [RGB](repeating: .black, count: n)
         }
+    }
+
+    /// Moves the Spectrum palette along the strip. Beat: slow drift plus a step on every beat (bigger on
+    /// every 4th) that glides in over ~0.3 s, so colors visibly change with the music without Party's hard cuts.
+    private func advanceSpectrumMotion() {
+        switch config.spectrumMotion {
+        case .off:
+            spectrumTarget = 0
+        case .flow:
+            spectrumTarget += 0.0015
+        case .beat:
+            spectrumTarget += 0.0008
+            if audio.beatCount != spectrumSeenBeat {
+                spectrumSeenBeat = audio.beatCount
+                spectrumBeats += 1
+                spectrumTarget += spectrumBeats % 4 == 0 ? 0.3 : 0.12
+            }
+        }
+        spectrumOffset += (spectrumTarget - spectrumOffset) * 0.22
+        // The mirrored wrap repeats every 2, so keep both numbers small without a visible change.
+        if spectrumOffset > 4, spectrumTarget > 4 { spectrumOffset -= 2; spectrumTarget -= 2 }
     }
 
     /// Club-style: every beat lands as a hard hit in a new color, and the pattern changes every 16 beats.

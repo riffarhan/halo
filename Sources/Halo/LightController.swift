@@ -46,6 +46,7 @@ struct Settings: Codable, Equatable {
     var paletteFrom = RGB(r: 255, g: 0, b: 120)
     var paletteTo = RGB(r: 0, g: 200, b: 255)
     var partyStrobe = false
+    var spectrumMotion: SpectrumMotion = .beat
     /// Manual fine-tune added on top of the automatic speaker match (can be negative).
     var lightDelayMs = 0.0
     /// Hold Music lights back by the speaker's reported latency (Bluetooth plays sound late).
@@ -223,6 +224,7 @@ final class LightController: ObservableObject {
             musicSmoothness: settings.tuning.smoothness,
             palette: settings.musicPalette.stops(customFrom: settings.paletteFrom, customTo: settings.paletteTo),
             strobe: settings.partyStrobe,
+            spectrumMotion: settings.spectrumMotion,
             lightDelayMs: effectiveLightDelayMs
         )
     }
@@ -288,6 +290,7 @@ final class LightController: ObservableObject {
         if engine.isRunning, s.layout != o.layout || s.picture != o.picture || s.musicTuning != o.musicTuning
             || s.musicPalette != o.musicPalette
             || s.paletteFrom != o.paletteFrom || s.paletteTo != o.paletteTo || s.partyStrobe != o.partyStrobe
+            || s.spectrumMotion != o.spectrumMotion
             || s.lightDelayMs != o.lightDelayMs || s.autoSpeakerSync != o.autoSpeakerSync {
             refreshLightDelay()
             engine.update(engineConfig)
@@ -622,6 +625,9 @@ final class LightController: ObservableObject {
         case "smoothness":
             guard let v = number(0 ... 100) else { return reject(url) }
             s.tuning.smoothness = v
+        case "motion":
+            guard let m = SpectrumMotion(rawValue: arg) else { return reject(url) }
+            s.spectrumMotion = m
         case "palette":
             guard let p = MusicPalette(rawValue: arg) else { return reject(url) }
             s.musicPalette = p

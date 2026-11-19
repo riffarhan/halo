@@ -92,6 +92,13 @@ private struct MusicSection: View {
             .labelsHidden()
             Text(caption).font(.caption).foregroundStyle(.secondary)
             if lights.settings.musicStyle != .screen { PalettePicker() }
+            if lights.settings.musicStyle == .spectrum {
+                Picker("Color motion", selection: $lights.settings.spectrumMotion) {
+                    ForEach(SpectrumMotion.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Text(motionCaption).font(.caption2).foregroundStyle(.secondary)
+            }
             if lights.settings.musicStyle == .party {
                 Toggle("Strobe on big hits", isOn: $lights.settings.partyStrobe)
                 Text("Short white flashes. Leave off if anyone nearby is sensitive to flashing light.")
@@ -120,6 +127,14 @@ private struct MusicSection: View {
             }
             if lights.settings.musicStyle == .screen { DisplayPicker() }
             CaptureErrorView()
+        }
+    }
+
+    private var motionCaption: String {
+        switch lights.settings.spectrumMotion {
+        case .off: "Colors stay fixed: bass color on the left, treble color on the right."
+        case .flow: "The palette drifts slowly along the strip."
+        case .beat: "Colors shift on every beat with a short glide, plus a bigger shift every 4 beats."
         }
     }
 
