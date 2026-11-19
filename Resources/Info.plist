@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Halo</string>
+    <key>CFBundleDisplayName</key>
+    <string>Halo</string>
+    <key>CFBundleIdentifier</key>
+    <string>local.halo.backlight</string>
+    <key>CFBundleExecutable</key>
+    <string>Halo</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Halo listens to a few test beeps to measure how late your speaker plays sound, so the lights can line up with the music.</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>local.halo.backlight</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>halo</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

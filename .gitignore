@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# SwiftPM / Xcode build products (build.sh builds in ~/Library/Caches/Halo-build)
+.build/
+build/
+.swiftpm/
+*.xcodeproj/
+xcuserdata/
+
+# Never commit signing material
+*.p12
+*.keychain-db
