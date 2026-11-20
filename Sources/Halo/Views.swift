@@ -103,7 +103,11 @@ private struct MusicSection: View {
             Text("When the music leans left or right, the other side of the strip dims.")
                 .font(.caption2).foregroundStyle(.secondary)
             if lights.settings.musicStyle == .party {
+                LabeledSlider(title: "Intensity", value: $lights.settings.partyIntensity, range: 0 ... 100, format: "%.0f")
+                Text("Low: colors fade into each other on the beat and the strip never goes dark. High: hard club hits.")
+                    .font(.caption2).foregroundStyle(.secondary)
                 Toggle("Strobe on big hits", isOn: $lights.settings.partyStrobe)
+                    .disabled(lights.settings.partyIntensity <= 60)
                 Text("Short white flashes. Leave off if anyone nearby is sensitive to flashing light.")
                     .font(.caption2).foregroundStyle(.secondary)
             }

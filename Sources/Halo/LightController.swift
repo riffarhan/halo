@@ -46,6 +46,8 @@ struct Settings: Codable, Equatable {
     var paletteFrom = RGB(r: 255, g: 0, b: 120)
     var paletteTo = RGB(r: 0, g: 200, b: 255)
     var partyStrobe = false
+    /// Party: 100 = club (hard hits), 0 = soft (colors crossfade on the beat, never dark).
+    var partyIntensity = 100.0
     var spectrumMotion: SpectrumMotion = .beat
     /// Music: the side of the strip away from the louder stereo channel dims.
     var stereo = true
@@ -244,6 +246,7 @@ final class LightController: ObservableObject {
             musicSmoothness: settings.tuning.smoothness,
             palette: settings.musicPalette.stops(customFrom: settings.paletteFrom, customTo: settings.paletteTo),
             strobe: settings.partyStrobe,
+            partyIntensity: settings.partyIntensity,
             spectrumMotion: settings.spectrumMotion,
             stereo: settings.stereo,
             lightDelayMs: effectiveLightDelayMs
@@ -314,7 +317,7 @@ final class LightController: ObservableObject {
         }
         if engine.isRunning, s.layout != o.layout || s.picture != o.picture || s.musicTuning != o.musicTuning
             || s.musicPalette != o.musicPalette
-            || s.paletteFrom != o.paletteFrom || s.paletteTo != o.paletteTo || s.partyStrobe != o.partyStrobe
+            || s.paletteFrom != o.paletteFrom || s.paletteTo != o.paletteTo || s.partyStrobe != o.partyStrobe || s.partyIntensity != o.partyIntensity
             || s.spectrumMotion != o.spectrumMotion || s.stereo != o.stereo
             || s.lightDelayMs != o.lightDelayMs || s.autoSpeakerSync != o.autoSpeakerSync {
             refreshLightDelay()
@@ -717,6 +720,9 @@ final class LightController: ObservableObject {
             } else if let d = displays.first(where: { $0.name.lowercased().contains(arg) }) {
                 s.displayID = d.id
             } else { return reject(url) }
+        case "intensity":
+            guard let v = number(0 ... 100) else { return reject(url) }
+            s.partyIntensity = v
         case "stereo":
             s.stereo = !["off", "0", "false"].contains(arg)
         case "videosync":
@@ -728,6 +734,9 @@ final class LightController: ObservableObject {
             return
         case "calibrate":
             measureSpeaker()
+            return
+        case "record":
+            engine.record(seconds: Double(arg) ?? 10)
             return
         default:
             return reject(url)

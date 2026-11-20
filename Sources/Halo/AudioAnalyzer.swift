@@ -39,11 +39,24 @@ final class AudioAnalyzer {
     private var ring: [Float] = []
     private var bandPeak = [Double](repeating: -40, count: bandCount)
     private var loudPeak = -40.0
-    private var lastBeat = Date.distantPast
+    /// Seconds of audio since the last kick (counted in samples, so timing doesn't depend on delivery).
+    private var sinceBeat = 10.0
     private var lp1: Float = 0, lp2: Float = 0
     private var bassSlow = 0.0, bassPeak = 0.0, bassPrev = 0.0
     /// Loudest recent kick level, halving over ~20 s: what kick strength is measured against.
     private var kickRef = 0.0
+    /// Kick-band level of the last 8 blocks (~40 ms): a kick has to rise clearly above their minimum.
+    private var bassRecent = [Double](repeating: 0, count: 8)
+    private var bassRecentIndex = 0
+    /// Peak level of the last kick. A new kick must beat 85 % of it as it fades (e^-t/0.5 s), so the swells of
+    /// one bass note don't count as new kicks, while a kick as hard 0.25 s later, or half as hard 0.5 s
+    /// later, still does.
+    private var lastBeatPeak = 0.0
+    /// Sum of squares and sample counts of the last 4 blocks (~21 ms): one full cycle of a 50 Hz kick,
+    /// so the level doesn't swing with the wave's phase the way a single 5 ms block does.
+    private var blockSums = [Float](repeating: 0, count: 4)
+    private var blockCounts = [Int](repeating: 0, count: 4)
+    private var blockIndex = 0
 
     init() {
         fft = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))!
@@ -55,7 +68,9 @@ final class AudioAnalyzer {
 
     func reset() {
         bands = [Double](repeating: 0, count: Self.bandCount)
-        loudness = 0; beat = 0; beatStrength = 0; bass = 0; balance = 0; kickRef = 0; ring.removeAll(keepingCapacity: true)
+        loudness = 0; beat = 0; beatStrength = 0; bass = 0; balance = 0; kickRef = 0; lastBeatPeak = 0
+        blockSums = [Float](repeating: 0, count: 4); blockCounts = [Int](repeating: 0, count: 4)
+        bassRecent = [Double](repeating: 0, count: 8); ring.removeAll(keepingCapacity: true)
     }
 
     /// Call once per output frame.
@@ -170,6 +185,9 @@ final class AudioAnalyzer {
         let a = Float(1 - exp(-2 * Double.pi * 150 / sampleRate))
         // Sensitivity 0 → needs 1.9× the recent bass level, 100 → 1.1×.
         let threshold = 1.9 - sensitivity * 0.008
+        // ... and a sharp rise: 1.5× (sensitivity 0) to 1.2× (100) the lowest level of the last ~40 ms.
+        // Without it a long, wobbling 808 note re-triggered every 150 ms, flashing new colors mid-note.
+        let rise = 1.5 - sensitivity * 0.003
         let block = 256
         var start = 0
         while start < samples.count {
@@ -180,20 +198,28 @@ final class AudioAnalyzer {
                 lp2 += a * (lp1 - lp2)
                 sum += lp2 * lp2
             }
-            let e = Double(sqrt(sum / Float(end - start)))
+            blockSums[blockIndex] = sum
+            blockCounts[blockIndex] = end - start
+            blockIndex = (blockIndex + 1) % blockSums.count
+            let e = Double(sqrt(blockSums.reduce(0, +) / Float(max(1, blockCounts.reduce(0, +)))))
             bassPeak = max(e, bassPeak * 0.9995)
-            let now = Date()
+            sinceBeat += Double(end - start) / sampleRate
             let rel = e > 0.002 && bassPeak > 0 ? min(e / bassPeak, 1) : 0
             bass = rel > bass ? bass + (rel - bass) * 0.5 : bass * 0.975 + rel * 0.025
             kickRef = max(e, kickRef * 0.99983)
             let strength = e > 0.002 && kickRef > 0 ? min(e / kickRef, 1) : 0
-            if now.timeIntervalSince(lastBeat) < 0.06 { beatStrength = max(beatStrength, strength) }
-            if e > 0.002, e > bassSlow * threshold, e > bassPeak * 0.3, e > bassPrev,
-               now.timeIntervalSince(lastBeat) > 0.15 {
+            if sinceBeat < 0.08 { beatStrength = max(beatStrength, strength); lastBeatPeak = max(lastBeatPeak, e) }
+            let mask = lastBeatPeak * 0.85 * exp(-sinceBeat / 0.5)
+            let floor = bassRecent.min() ?? 0
+            bassRecent[bassRecentIndex] = e
+            bassRecentIndex = (bassRecentIndex + 1) % bassRecent.count
+            if e > 0.002, e > bassSlow * threshold, e > bassPeak * 0.3, e > bassPrev, e > floor * rise, e > mask,
+               sinceBeat > 0.15 {
                 beat = 1
                 beatStrength = strength
+                lastBeatPeak = e
                 beatCount &+= 1
-                lastBeat = now
+                sinceBeat = 0
                 onBeat?()
             }
             bassPrev = e
@@ -210,8 +236,8 @@ final class AudioAnalyzer {
             let db = 10 * log10(Double(r + quiet) / Double(l + quiet))
             target = min(max(db / 12, -1), 1)
         }
-        // ~0.15 s to settle, so a panned instrument moves the light but single drum hits don't flicker it.
-        balance += (target - balance) * 0.12
+        // ~0.4 s to settle, so a panned instrument moves the light but drum hits and reverb don't flicker it.
+        balance += (target - balance) * 0.03
     }
 
     private func smooth(_ old: Double, _ new: Double) -> Double {

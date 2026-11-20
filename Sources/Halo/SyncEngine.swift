@@ -125,6 +125,8 @@ struct EngineConfig: Equatable {
     var palette = MusicPalette.rainbow.stops(customFrom: .black, customTo: .black)
     /// Party style: short white flashes on big hits.
     var strobe = false
+    /// Party style: 100 = club (hard hits), 0 = soft (crossfades, never dark).
+    var partyIntensity = 100.0
     /// Spectrum style: how the palette moves along the strip over time.
     var spectrumMotion: SpectrumMotion = .beat
     /// Music: dim the side of the strip away from the louder stereo channel.
@@ -164,6 +166,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     private let audio = AudioAnalyzer()
     private var hue = 0.0
     private var musicFade: [Double] = []
+    private var musicLit: [Bool] = []
     // Party style state (q only)
     // Spectrum color motion state (q only)
     private var spectrumOffset = 0.0
@@ -172,6 +175,10 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     private var spectrumBeats = 0
     private var spectrumApplied = 0.0
     private var ledXKey: LedLayout?
+    // Debug frame recorder (q only)
+    private var recordUntil: Date?
+    private var recordLines: [String] = []
+    private var recordStart = Date()
     private var ledXCache: [Double] = []
     private var spectrumHistory: [Double] = []
     private var partySeenBeat = 0
@@ -414,7 +421,8 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             audio.decay()
             var raw = musicColors(style)
             if config.stereo { raw = applyStereo(raw) }
-            colors = fadeMusic(raw, punchy: style == .party)
+            colors = fadeMusic(raw, punch: style == .party ? min(max(config.partyIntensity / 100, 0), 1) : 0)
+            if recordUntil != nil { recordFrame(colors) }
             let now = Date()
             if now.timeIntervalSince(lastStats) > 1 {
                 lastStats = now
@@ -530,8 +538,11 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     }
 
     /// Club-style: every beat lands as a hard hit in a new color, and the pattern changes every 16 beats.
+    /// Intensity (0...1) runs from Club (hard cuts, dark between hits) down to Soft: colors crossfade on
+    /// each beat, the strip never drops to dark, and kicks only lift the brightness a little.
     private func partyColors(_ n: Int) -> [RGB] {
         let now = Date()
+        let intensity = min(max(config.partyIntensity / 100, 0), 1)
         if audio.beatCount != partySeenBeat {
             partySeenBeat = audio.beatCount
             partyBeats += 1
@@ -540,7 +551,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             partyBeatTime = now
             if partyBeats % 16 == 0 { partyPattern = (partyPattern + 1) % 4 }
             // Strobe on the downbeat of each bar when the track is loud.
-            if config.strobe, partyBeats % 4 == 0, audio.loudness > 0.7 { strobeFrames = 2 }
+            if config.strobe, intensity > 0.6, partyBeats % 4 == 0, audio.loudness > 0.7 { strobeFrames = 2 }
         }
         if strobeFrames > 0 {
             strobeFrames -= 1
@@ -553,36 +564,70 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             let x = (Double(k) * 0.381966).truncatingRemainder(dividingBy: 1)
             return MusicPalette.sample(stops, stops.count == 2 ? Double(k % 2) : x)
         }
-        let hit = audio.beat                                   // 1 on the beat, decays fast
-        let glow = 0.04 + 0.18 * audio.loudness                 // background between beats
+        // Hits land as hard as the kick (a soft one ~45 %, the hardest full), and between kicks the strip
+        // pumps with the bass line instead of sitting at a flat glow.
+        let hit = audio.beat * (0.45 + 0.55 * audio.beatStrength) * (0.3 + 0.7 * intensity)
+        let soft = 1 - intensity
+        let floorLevel = 0.5 * soft * (0.7 + 0.3 * audio.bass)
+        let glow = max(0.04 + 0.1 * audio.loudness + 0.4 * audio.bass * audio.bass, floorLevel)
+        let lit = glow + hit * (1 - glow)
+        let dim = 0.5 + 0.5 * soft                              // how bright the unlit parts of a pattern stay
         let since = now.timeIntervalSince(partyBeatTime)
-        let c = color(partyColor), prev = color(partyPrevColor)
+        // New beat color: a hard cut at full intensity, up to a ~0.5 s crossfade at the softest.
+        let fadeTime = 0.5 * pow(soft, 1.5)
+        let blend = fadeTime < 0.01 ? 1 : min(1, since / fadeTime)
+        let prev = color(partyPrevColor), next = color(partyColor)
+        let e = blend * blend * (3 - 2 * blend)
+        let c = (r: prev.r + (next.r - prev.r) * e, g: prev.g + (next.g - prev.g) * e, b: prev.b + (next.b - prev.b) * e)
         partyPhase = (partyPhase + 0.008 + audio.loudness * 0.025).truncatingRemainder(dividingBy: 1)
 
         return (0 ..< n).map { i in
             let p = n > 1 ? Double(i) / Double(n - 1) : 0
             switch partyPattern {
             case 0:  // Full flash
-                return scaled(c, max(hit, glow))
+                return scaled(c, lit)
             case 1:  // Left and right halves take turns
                 let litLeft = partyBeats % 2 == 0
                 let onLit = (p < 0.5) == litLeft
-                return onLit ? scaled(c, max(hit, glow)) : scaled(prev, glow * 0.6)
+                return onLit ? scaled(c, lit) : scaled(prev, glow * (0.6 + 0.4 * soft))
             case 2:  // Four segments chasing around the strip
                 let x = (p * 4 - partyPhase * 4 + Double(partyBeats) * 0.25).truncatingRemainder(dividingBy: 1)
                 let inSegment = (x < 0 ? x + 1 : x) < 0.35
-                return inSegment ? scaled(c, max(0.55, hit)) : scaled(prev, glow * 0.5)
+                return inSegment ? scaled(c, max(0.55, lit)) : scaled(prev, glow * dim)
             default: // Burst expanding from the top centre on each beat
                 let radius = since * 1.6
                 let d = abs(p - 0.5)
                 let ring = d < radius && d > radius - 0.18
-                return ring ? scaled(c, max(0.4, 1 - since * 1.2)) : scaled(prev, glow * 0.5)
+                return ring ? scaled(c, max(0.4, 1 - since * 1.2, lit)) : scaled(prev, glow * dim)
             }
         }
     }
 
-    /// Rises fairly quickly (so beats still land) but falls slowly, which removes the flicker
-    /// that raw audio levels cause. Works per LED and per channel.
+    /// Writes every music frame (audio features + LED colors) for `seconds` to
+    /// ~/Library/Caches/Halo-build/frames.csv, for diagnosing how the lights respond.
+    func record(seconds: Double) {
+        q.async {
+            self.recordStart = Date()
+            self.recordUntil = Date().addingTimeInterval(seconds)
+            self.recordLines = ["t,beatCount,strength,bass,balance,loudness,offset,colors"]
+        }
+    }
+
+    private func recordFrame(_ colors: [RGB]) {
+        let now = Date()
+        let rgb = colors.map { "\($0.r) \($0.g) \($0.b)" }.joined(separator: ";")
+        recordLines.append(String(format: "%.4f,%d,%.3f,%.3f,%.3f,%.3f,%.4f,", now.timeIntervalSince(recordStart),
+                                  audio.beatCount, audio.beatStrength, audio.bass, audio.balance, audio.loudness,
+                                  spectrumOffset) + rgb)
+        if let until = recordUntil, now >= until {
+            recordUntil = nil
+            let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Halo-build")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? recordLines.joined(separator: "\n").write(to: dir.appendingPathComponent("frames.csv"), atomically: true, encoding: .utf8)
+            recordLines = []
+        }
+    }
+
     /// Horizontal position of each LED as seen from the front: 0 = left edge, 1 = right edge.
     private func ledX(_ layout: LedLayout) -> [Double] {
         if ledXKey == layout, ledXCache.count == layout.total { return ledXCache }
@@ -601,8 +646,10 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     /// Follows the stereo image: the side away from the louder channel dims (up to 85 % when one channel
     /// is 12 dB louder), the dominant side and the middle keep full brightness.
     private func applyStereo(_ colors: [RGB]) -> [RGB] {
-        let b = audio.balance
-        guard abs(b) > 0.02 else { return colors }
+        // Ignore the small imbalance most mixes have; follow clear left/right leaning.
+        let raw = audio.balance
+        let b = raw < 0 ? min(0, raw + 0.1) / 0.9 : max(0, raw - 0.1) / 0.9
+        guard abs(b) > 0.01 else { return colors }
         let xs = ledX(config.layout)
         guard xs.count == colors.count else { return colors }
         return zip(colors, xs).map { c, x in
@@ -612,13 +659,18 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
         }
     }
 
-    private func fadeMusic(_ colors: [RGB], punchy: Bool = false) -> [RGB] {
+    /// Rises fairly quickly (so beats still land) but falls slowly, which removes the flicker
+    /// that raw audio levels cause. Works per LED and per channel. A dark LED only turns on once it
+    /// would be clearly visible, so near-black LEDs don't sparkle on and off.
+    private func fadeMusic(_ colors: [RGB], punch: Double = 0) -> [RGB] {
         let s = min(max(config.musicSmoothness, 0), 100) / 100
-        // Party hits must land instantly; smoothness then only shapes how fast they fall away.
-        let attack = punchy ? 1 : 0.9 - 0.6 * s   // share of the gap closed per frame when getting brighter
-        let release = punchy ? 0.55 - 0.35 * s : 0.4 - 0.34 * s   // ... and when getting darker
+        // Full-intensity Party hits must land instantly; smoothness then only shapes how fast they fall away.
+        // `punch` blends from the normal soft fades (0) to that (1).
+        let attack = punch + (1 - punch) * (0.9 - 0.6 * s)   // share of the gap closed per frame when getting brighter
+        let release = punch * (0.55 - 0.35 * s) + (1 - punch) * (0.4 - 0.34 * s)   // ... and when getting darker
         if musicFade.count != colors.count * 3 {
             musicFade = colors.flatMap { [Double($0.r), Double($0.g), Double($0.b)] }
+            musicLit = [Bool](repeating: true, count: colors.count)
         }
         var out: [RGB] = []
         out.reserveCapacity(colors.count)
@@ -630,6 +682,9 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
                 musicFade[j] = old + (new - old) * (new > old ? attack : release)
                 channels[k] = musicFade[j]
             }
+            let peak = channels.max() ?? 0
+            if musicLit[i] ? peak < 3 : peak >= 8 { musicLit[i].toggle() }
+            guard musicLit[i] else { out.append(.black); continue }
             func byte(_ v: Double) -> UInt8 { v < 2 ? 0 : UInt8(min(255, v.rounded())) }
             out.append(RGB(r: byte(channels[0]), g: byte(channels[1]), b: byte(channels[2])))
         }
