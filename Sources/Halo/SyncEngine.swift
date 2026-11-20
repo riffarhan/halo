@@ -70,7 +70,7 @@ enum MusicStyle: String, Codable, CaseIterable, Identifiable {
 }
 
 enum SpectrumMotion: String, Codable, CaseIterable, Identifiable {
-    case off, flow, beat
+    case off, flow, beat, wave
     var id: String { rawValue }
     var title: String { rawValue.capitalized }
 }
@@ -127,6 +127,8 @@ struct EngineConfig: Equatable {
     var strobe = false
     /// Spectrum style: how the palette moves along the strip over time.
     var spectrumMotion: SpectrumMotion = .beat
+    /// Music: dim the side of the strip away from the louder stereo channel.
+    var stereo = true
     /// Hold music frames back by this much so they line up with speakers that play late (Bluetooth).
     var lightDelayMs = 0.0
 }
@@ -168,6 +170,10 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     private var spectrumTarget = 0.0
     private var spectrumSeenBeat = 0
     private var spectrumBeats = 0
+    private var spectrumApplied = 0.0
+    private var ledXKey: LedLayout?
+    private var ledXCache: [Double] = []
+    private var spectrumHistory: [Double] = []
     private var partySeenBeat = 0
     private var partyBeats = 0
     private var partyPattern = 0
@@ -406,7 +412,9 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             colors = c
         case .music(let style):
             audio.decay()
-            colors = fadeMusic(musicColors(style), punchy: style == .party)
+            var raw = musicColors(style)
+            if config.stereo { raw = applyStereo(raw) }
+            colors = fadeMusic(raw, punchy: style == .party)
             let now = Date()
             if now.timeIntervalSince(lastStats) > 1 {
                 lastStats = now
@@ -444,9 +452,12 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             advanceSpectrumMotion()
             let bands = audio.bands
             let stops = config.palette
-            let offset = spectrumOffset
+            // Wave: the bass end shows the newest colors and the treble end what the bass end showed ~0.6 s ago,
+            // so every kick travels along the strip.
+            let travel = config.spectrumMotion == .wave ? Double(max(5, config.picture.fps)) * 0.6 : 0
             return (0 ..< n).map { i in
                 let p = n > 1 ? Double(i) / Double(n - 1) : 0
+                let offset = pastSpectrumOffset(framesAgo: p * travel)
                 let f = p * Double(bands.count - 1)
                 let lo = Int(f), hi = min(lo + 1, bands.count - 1)
                 let level = pow(bands[lo] + (bands[hi] - bands[lo]) * (f - Double(lo)), 1.4)
@@ -474,25 +485,48 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
         }
     }
 
-    /// Moves the Spectrum palette along the strip. Beat: slow drift plus a step on every beat (bigger on
-    /// every 4th) that glides in over ~0.3 s, so colors visibly change with the music without Party's hard cuts.
+    /// Moves the Spectrum palette along the strip. Beat and Wave are driven by the bass: the palette flows
+    /// while bass plays (faster the heavier it is, still in quiet parts) and jumps on every kick by how hard
+    /// it hits (a soft kick barely, a heavy one by half the palette; 1.4× on every 4th beat), gliding in
+    /// over ~0.15 s.
     private func advanceSpectrumMotion() {
         switch config.spectrumMotion {
         case .off:
             spectrumTarget = 0
         case .flow:
             spectrumTarget += 0.0015
-        case .beat:
-            spectrumTarget += 0.0008
+        case .beat, .wave:
+            spectrumTarget += 0.0004 + 0.012 * audio.bass * audio.bass
             if audio.beatCount != spectrumSeenBeat {
                 spectrumSeenBeat = audio.beatCount
                 spectrumBeats += 1
-                spectrumTarget += spectrumBeats % 4 == 0 ? 0.3 : 0.12
+                spectrumApplied = 0
+            }
+            // Strength keeps rising for the kick's first ~60 ms, so add only what it grew since last frame.
+            let s = audio.beatStrength
+            if s > spectrumApplied {
+                let accent = spectrumBeats % 4 == 0 ? 1.4 : 1
+                spectrumTarget += 0.5 * (s * s - spectrumApplied * spectrumApplied) * accent
+                spectrumApplied = s
             }
         }
-        spectrumOffset += (spectrumTarget - spectrumOffset) * 0.22
-        // The mirrored wrap repeats every 2, so keep both numbers small without a visible change.
-        if spectrumOffset > 4, spectrumTarget > 4 { spectrumOffset -= 2; spectrumTarget -= 2 }
+        spectrumOffset += (spectrumTarget - spectrumOffset) * 0.3
+        spectrumHistory.append(spectrumOffset)
+        if spectrumHistory.count > 90 { spectrumHistory.removeFirst(spectrumHistory.count - 90) }
+        // The mirrored wrap repeats every 2, so keep the numbers small without a visible change.
+        if spectrumOffset > 4, spectrumTarget > 4 {
+            spectrumOffset -= 2; spectrumTarget -= 2
+            for i in spectrumHistory.indices { spectrumHistory[i] -= 2 }
+        }
+    }
+
+    /// The palette offset `framesAgo` frames back (interpolated), for Wave's travel along the strip.
+    private func pastSpectrumOffset(framesAgo: Double) -> Double {
+        guard framesAgo > 0, spectrumHistory.count > 1 else { return spectrumOffset }
+        let last = spectrumHistory.count - 1
+        let x = Double(last) - min(framesAgo, Double(last))
+        let lo = Int(x), hi = min(lo + 1, last)
+        return spectrumHistory[lo] + (spectrumHistory[hi] - spectrumHistory[lo]) * (x - Double(lo))
     }
 
     /// Club-style: every beat lands as a hard hit in a new color, and the pattern changes every 16 beats.
@@ -549,6 +583,35 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
 
     /// Rises fairly quickly (so beats still land) but falls slowly, which removes the flicker
     /// that raw audio levels cause. Works per LED and per channel.
+    /// Horizontal position of each LED as seen from the front: 0 = left edge, 1 = right edge.
+    private func ledX(_ layout: LedLayout) -> [Double] {
+        if ledXKey == layout, ledXCache.count == layout.total { return ledXCache }
+        var L = layout
+        if L.start == .bottomRight { swap(&L.left, &L.right) }
+        var x: [Double] = []
+        x += [Double](repeating: 0, count: L.left)
+        x += (0 ..< L.top).map { (Double($0) + 0.5) / Double(L.top) }
+        x += [Double](repeating: 1, count: L.right)
+        x += (0 ..< L.bottom).map { 1 - (Double($0) + 0.5) / Double(L.bottom) }
+        if L.start == .bottomRight { x = x.map { 1 - $0 } }
+        ledXKey = layout; ledXCache = x
+        return x
+    }
+
+    /// Follows the stereo image: the side away from the louder channel dims (up to 85 % when one channel
+    /// is 12 dB louder), the dominant side and the middle keep full brightness.
+    private func applyStereo(_ colors: [RGB]) -> [RGB] {
+        let b = audio.balance
+        guard abs(b) > 0.02 else { return colors }
+        let xs = ledX(config.layout)
+        guard xs.count == colors.count else { return colors }
+        return zip(colors, xs).map { c, x in
+            let away = max(0, -b * (2 * x - 1))   // 0 on the loud side and in the middle, up to |b| on the far side
+            let g = 1 - 0.85 * away
+            return RGB(r: UInt8(Double(c.r) * g), g: UInt8(Double(c.g) * g), b: UInt8(Double(c.b) * g))
+        }
+    }
+
     private func fadeMusic(_ colors: [RGB], punchy: Bool = false) -> [RGB] {
         let s = min(max(config.musicSmoothness, 0), 100) / 100
         // Party hits must land instantly; smoothness then only shapes how fast they fall away.

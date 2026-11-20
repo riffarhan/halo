@@ -47,6 +47,8 @@ struct Settings: Codable, Equatable {
     var paletteTo = RGB(r: 0, g: 200, b: 255)
     var partyStrobe = false
     var spectrumMotion: SpectrumMotion = .beat
+    /// Music: the side of the strip away from the louder stereo channel dims.
+    var stereo = true
     /// Manual fine-tune added on top of the automatic speaker match (can be negative).
     var lightDelayMs = 0.0
     /// Hold Music lights back by the speaker's reported latency (Bluetooth plays sound late).
@@ -243,6 +245,7 @@ final class LightController: ObservableObject {
             palette: settings.musicPalette.stops(customFrom: settings.paletteFrom, customTo: settings.paletteTo),
             strobe: settings.partyStrobe,
             spectrumMotion: settings.spectrumMotion,
+            stereo: settings.stereo,
             lightDelayMs: effectiveLightDelayMs
         )
     }
@@ -312,7 +315,7 @@ final class LightController: ObservableObject {
         if engine.isRunning, s.layout != o.layout || s.picture != o.picture || s.musicTuning != o.musicTuning
             || s.musicPalette != o.musicPalette
             || s.paletteFrom != o.paletteFrom || s.paletteTo != o.paletteTo || s.partyStrobe != o.partyStrobe
-            || s.spectrumMotion != o.spectrumMotion
+            || s.spectrumMotion != o.spectrumMotion || s.stereo != o.stereo
             || s.lightDelayMs != o.lightDelayMs || s.autoSpeakerSync != o.autoSpeakerSync {
             refreshLightDelay()
             engine.update(engineConfig)
@@ -714,6 +717,8 @@ final class LightController: ObservableObject {
             } else if let d = displays.first(where: { $0.name.lowercased().contains(arg) }) {
                 s.displayID = d.id
             } else { return reject(url) }
+        case "stereo":
+            s.stereo = !["off", "0", "false"].contains(arg)
         case "videosync":
             s.videoSync = !["off", "0", "false"].contains(arg)
         case "blackbars":

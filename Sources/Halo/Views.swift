@@ -99,6 +99,9 @@ private struct MusicSection: View {
                 .pickerStyle(.segmented)
                 Text(motionCaption).font(.caption2).foregroundStyle(.secondary)
             }
+            Toggle("Follow stereo (left/right)", isOn: $lights.settings.stereo)
+            Text("When the music leans left or right, the other side of the strip dims.")
+                .font(.caption2).foregroundStyle(.secondary)
             if lights.settings.musicStyle == .party {
                 Toggle("Strobe on big hits", isOn: $lights.settings.partyStrobe)
                 Text("Short white flashes. Leave off if anyone nearby is sensitive to flashing light.")
@@ -134,7 +137,8 @@ private struct MusicSection: View {
         switch lights.settings.spectrumMotion {
         case .off: "Colors stay fixed: bass color on the left, treble color on the right."
         case .flow: "The palette drifts slowly along the strip."
-        case .beat: "Colors shift on every beat with a short glide, plus a bigger shift every 4 beats."
+        case .beat: "Colors follow the bass: they flow while bass plays and jump on every kick, further the harder it hits."
+        case .wave: "Like Beat, but each kick's new colors start at the bass end and travel across the strip."
         }
     }
 

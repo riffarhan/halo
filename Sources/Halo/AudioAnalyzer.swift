@@ -15,6 +15,13 @@ final class AudioAnalyzer {
     private(set) var beat = 0.0
     /// Increments on every beat; used to step colors.
     private(set) var beatCount = 0
+    /// 0...1 how hard the latest kick hit compared with the loudest recent ones. Starts at the kick's onset
+    /// and keeps rising for its first ~60 ms, until the kick peaks.
+    private(set) var beatStrength = 0.0
+    /// 0...1 continuous bass level (the kick band relative to its recent peak): fast attack, ~0.2 s release.
+    private(set) var bass = 0.0
+    /// -1 (all left) ... 0 (centered) ... +1 (all right): the left/right level difference, ±12 dB = ±1, smoothed.
+    private(set) var balance = 0.0
 
     /// Higher = reacts to quieter sound. 0...100.
     var sensitivity = 50.0
@@ -35,6 +42,8 @@ final class AudioAnalyzer {
     private var lastBeat = Date.distantPast
     private var lp1: Float = 0, lp2: Float = 0
     private var bassSlow = 0.0, bassPeak = 0.0, bassPrev = 0.0
+    /// Loudest recent kick level, halving over ~20 s: what kick strength is measured against.
+    private var kickRef = 0.0
 
     init() {
         fft = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))!
@@ -46,7 +55,7 @@ final class AudioAnalyzer {
 
     func reset() {
         bands = [Double](repeating: 0, count: Self.bandCount)
-        loudness = 0; beat = 0; ring.removeAll(keepingCapacity: true)
+        loudness = 0; beat = 0; beatStrength = 0; bass = 0; balance = 0; kickRef = 0; ring.removeAll(keepingCapacity: true)
     }
 
     /// Call once per output frame.
@@ -63,6 +72,7 @@ final class AudioAnalyzer {
         let frames = sb.numSamples
         guard frames > 0 else { return }
         var mono = [Float](repeating: 0, count: frames)
+        var energyL: Float = 0, energyR: Float = 0, stereo = false
         let nonInterleaved = asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
         try? sb.withAudioBufferList { list, _ in
             if nonInterleaved {
@@ -71,6 +81,10 @@ final class AudioAnalyzer {
                     guard let d = buf.mData?.assumingMemoryBound(to: Float.self) else { continue }
                     let count = min(frames, Int(buf.mDataByteSize) / 4)
                     for i in 0 ..< count { mono[i] += d[i] }
+                    if channels < 2 {
+                        let e = vDSP.sumOfSquares(UnsafeBufferPointer(start: d, count: count))
+                        if channels == 0 { energyL = e } else { energyR = e; stereo = true }
+                    }
                     channels += 1
                 }
                 if channels > 1 { vDSP.multiply(1 / Float(channels), mono, result: &mono) }
@@ -80,7 +94,9 @@ final class AudioAnalyzer {
                     var s: Float = 0
                     for c in 0 ..< ch { s += d[i * ch + c] }
                     mono[i] = s / Float(ch)
+                    if ch >= 2 { energyL += d[i * ch] * d[i * ch]; energyR += d[i * ch + 1] * d[i * ch + 1] }
                 }
+                stereo = ch >= 2
             }
         }
         let delivered = CMClockGetTime(CMClockGetHostTimeClock()).seconds
@@ -89,6 +105,7 @@ final class AudioAnalyzer {
             let ms = (delivered - end) * 1000
             captureLatencyMs = captureLatencyMs == 0 ? ms : captureLatencyMs * 0.95 + ms * 0.05
         }
+        updateBalance(stereo ? energyL : 0, stereo ? energyR : 0, frames: frames)
         detectBeats(mono, sampleRate: asbd.mSampleRate)
         analyze(mono, sampleRate: asbd.mSampleRate)
     }
@@ -166,9 +183,15 @@ final class AudioAnalyzer {
             let e = Double(sqrt(sum / Float(end - start)))
             bassPeak = max(e, bassPeak * 0.9995)
             let now = Date()
+            let rel = e > 0.002 && bassPeak > 0 ? min(e / bassPeak, 1) : 0
+            bass = rel > bass ? bass + (rel - bass) * 0.5 : bass * 0.975 + rel * 0.025
+            kickRef = max(e, kickRef * 0.99983)
+            let strength = e > 0.002 && kickRef > 0 ? min(e / kickRef, 1) : 0
+            if now.timeIntervalSince(lastBeat) < 0.06 { beatStrength = max(beatStrength, strength) }
             if e > 0.002, e > bassSlow * threshold, e > bassPeak * 0.3, e > bassPrev,
                now.timeIntervalSince(lastBeat) > 0.15 {
                 beat = 1
+                beatStrength = strength
                 beatCount &+= 1
                 lastBeat = now
                 onBeat?()
@@ -177,6 +200,18 @@ final class AudioAnalyzer {
             bassSlow = bassSlow == 0 ? e : bassSlow * 0.985 + e * 0.015
             start = end
         }
+    }
+
+    /// Left/right balance in dB, mapped so ±12 dB is ±1. Silence and mono drift back to centered.
+    private func updateBalance(_ l: Float, _ r: Float, frames: Int) {
+        let quiet = Float(frames) * 1e-7   // ≈ -70 dBFS RMS
+        var target = 0.0
+        if l + r > quiet * 2 {
+            let db = 10 * log10(Double(r + quiet) / Double(l + quiet))
+            target = min(max(db / 12, -1), 1)
+        }
+        // ~0.15 s to settle, so a panned instrument moves the light but single drum hits don't flicker it.
+        balance += (target - balance) * 0.12
     }
 
     private func smooth(_ old: Double, _ new: Double) -> Double {
