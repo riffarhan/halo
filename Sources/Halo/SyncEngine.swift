@@ -580,13 +580,12 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             let x = (Double(k) * 0.381966).truncatingRemainder(dividingBy: 1)
             return MusicPalette.sample(stops, stops.count == 2 ? Double(k % 2) : x)
         }
-        // Hits land at full strength the moment the kick starts (kick strength is only known ~80 ms later,
-        // too late for the flash). Between kicks a thin glow follows the bass line, kept low so hits stand out.
+        // At intensity 100 this is the original Party exactly: full hits, a low glow that follows loudness,
+        // hard color cuts. Lower intensity raises the glow floor and softens hits and cuts.
         let hit = audio.beat * (0.3 + 0.7 * intensity)
         let soft = 1 - intensity
-        let floorLevel = 0.5 * soft * (0.7 + 0.3 * audio.bass)
-        let glow = max(0.04 + 0.12 * audio.loudness + 0.15 * audio.bass * audio.bass, floorLevel)
-        let lit = glow + hit * (1 - glow)
+        let glow = max(0.04 + 0.18 * audio.loudness, 0.5 * soft * (0.7 + 0.3 * audio.bass))
+        let lit = max(hit, glow)
         let dim = 0.5 + 0.5 * soft                              // how bright the unlit parts of a pattern stay
         let since = now.timeIntervalSince(partyBeatTime)
         // New beat color: a hard cut at full intensity, up to a ~0.5 s crossfade at the softest.
@@ -614,7 +613,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
                 let radius = since * 1.6
                 let d = abs(p - 0.5)
                 let ring = d < radius && d > radius - 0.18
-                return ring ? scaled(c, max(0.4, 1 - since * 1.2, lit)) : scaled(prev, glow * dim)
+                return ring ? scaled(c, max(0.4, 1 - since * 1.2, glow)) : scaled(prev, glow * dim)
             }
         }
     }
@@ -647,11 +646,8 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     /// How big the beat effects are right now: 0.55 in the calmest part of the song, 1.45 in its biggest.
     private var energyScale: Double { config.songEnergy ? 0.55 + 0.9 * audio.energy : 1 }
 
-    /// Party intensity after song energy: verses play softer than the setting, choruses at it.
-    private var partyIntensity: Double {
-        let set = min(max(config.partyIntensity / 100, 0), 1)
-        return config.songEnergy ? set * (0.45 + 0.55 * audio.energy) : set
-    }
+    /// Party intensity as set. Song energy doesn't change it: at 100, Party stays the original club look.
+    private var partyIntensity: Double { min(max(config.partyIntensity / 100, 0), 1) }
 
     /// Horizontal position of each LED as seen from the front: 0 = left edge, 1 = right edge.
     private func ledX(_ layout: LedLayout) -> [Double] {
