@@ -58,6 +58,10 @@ struct Settings: Codable, Equatable {
     var picture = PictureSettings()
     var offOnSleep = true
     var offOnQuit = true
+    /// Route Bluetooth sound through Halo Sync so video players hold the picture back by the real delay.
+    var videoSync = false
+    /// End-to-end delay measured through Halo Sync, in ms, by speaker name.
+    var videoSyncLatency: [String: Double] = [:]
 }
 
 struct MusicTuning: Codable, Equatable {
@@ -115,6 +119,8 @@ final class LightController: ObservableObject {
     @Published private(set) var effectiveLightDelayMs = 0.0
     @Published var launchAtLoginError: String?
 
+    let videoSync = VideoSync()
+    @Published private(set) var installingDriver = false
     private let device = RobobloqDevice()
     private lazy var engine = SyncEngine(device: device)
     private var asleep = false
@@ -147,6 +153,18 @@ final class LightController: ObservableObject {
                 self?.syncError = "Capture stopped: \(error.localizedDescription)"
             }
         }
+        videoSync.latencyFor = { [weak self] name, reported in
+            MainActor.assumeIsolated { self?.videoLatency(for: name, reported: reported) ?? reported }
+        }
+        videoSync.onChange = { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.objectWillChange.send()
+                self.outputDevice = Self.currentOutputDevice()
+                self.refreshLightDelay()
+            }
+        }
+        videoSync.setEnabled(settings.videoSync)
         device.start()
         observeSystem()
         startAutoWatcher()
@@ -257,6 +275,10 @@ final class LightController: ObservableObject {
 
     private func settingsChanged(from old: Settings) {
         save()
+        if settings.videoSync != old.videoSync { videoSync.setEnabled(settings.videoSync) }
+        if settings.videoSyncLatency != old.videoSyncLatency || settings.measuredLatency != old.measuredLatency {
+            videoSync.refreshLatency()
+        }
         guard connected else { return }
         let s = settings, o = old
 
@@ -443,8 +465,10 @@ final class LightController: ObservableObject {
         var d = settings.lightDelayMs
         if settings.autoSpeakerSync, let out = outputDevice {
             // Sound is heard `speaker` ms after it plays; Halo already sees it `audioLatencyMs` after,
-            // and the USB write to the strip takes a few more ms.
-            let speaker = settings.measuredLatency[out.name] ?? out.latencyMs
+            // and the USB write to the strip takes a few more ms. Through Halo Sync, the delay it reports is
+            // the whole path to the speaker.
+            let speaker = videoSync.route != nil ? videoSync.reportedLatencyMs
+                : settings.measuredLatency[out.name] ?? out.latencyMs
             d += speaker - max(0, audioLatencyMs ?? 0) - 8
         }
         return max(0, d)
@@ -461,12 +485,24 @@ final class LightController: ObservableObject {
         guard let out = Self.currentOutputDevice() else { return }
         calibrating = true
         calibrationMessage = "Listening… (8 beeps)"
+        let route = videoSync.route
         Task {
             do {
-                let r = try await SpeakerCalibrator.run()
-                settings.measuredLatency[out.name] = r.latencyMs
-                calibrationMessage = String(format: "%@: measured %.0f ms (±%.0f, %d/%d beeps). macOS reports %.0f ms.",
-                                            out.name, r.latencyMs, r.spreadMs, r.heard, r.total, out.latencyMs)
+                if let route {
+                    // Measure the whole path through Halo Sync with nothing reported, then report exactly that.
+                    videoSync.setReportedLatency(0)
+                    try? await Task.sleep(for: .milliseconds(600))
+                    defer { videoSync.refreshLatency() }
+                    let r = try await SpeakerCalibrator.run()
+                    settings.videoSyncLatency[route.targetName] = r.latencyMs
+                    calibrationMessage = String(format: "%@ through Halo Sync: measured %.0f ms (±%.0f, %d/%d beeps). Apps are now told %.0f ms.",
+                                                route.targetName, r.latencyMs, r.spreadMs, r.heard, r.total, r.latencyMs)
+                } else {
+                    let r = try await SpeakerCalibrator.run()
+                    settings.measuredLatency[out.name] = r.latencyMs
+                    calibrationMessage = String(format: "%@: measured %.0f ms (±%.0f, %d/%d beeps). macOS reports %.0f ms.",
+                                                out.name, r.latencyMs, r.spreadMs, r.heard, r.total, out.latencyMs)
+                }
             } catch {
                 calibrationMessage = error.localizedDescription
             }
@@ -476,6 +512,43 @@ final class LightController: ObservableObject {
             refreshLightDelay()
         }
     }
+
+    /// Delay Halo Sync reports for a speaker: measured through Halo Sync if possible, else the speaker's own
+    /// measurement (or Core Audio's figure) plus what the forwarding adds.
+    private func videoLatency(for name: String, reported: Double) -> Double {
+        if let measured = settings.videoSyncLatency[name] { return measured }
+        let forwarding = max(videoSync.bufferMs, 10) + 6
+        return (settings.measuredLatency[name] ?? reported) + forwarding
+    }
+
+    /// Copies the Halo Sync driver from the app bundle into the system and restarts Core Audio.
+    /// macOS asks for an administrator password in its own dialog.
+    func installVideoSyncDriver() {
+        guard !installingDriver, let src = Bundle.main.url(forResource: "HaloSync", withExtension: "driver") else {
+            videoSyncError = "The driver isn't inside this copy of Halo. Rebuild with ./build.sh."
+            return
+        }
+        installingDriver = true
+        videoSyncError = nil
+        let dest = VideoSync.driverPath
+        let shell = "rm -rf '\(dest)' && cp -R '\(src.path)' /Library/Audio/Plug-Ins/HAL/ && chown -R root:wheel '\(dest)' && killall coreaudiod"
+        let script = "do shell script \"\(shell)\" with administrator privileges"
+        Task.detached {
+            var error: NSDictionary?
+            NSAppleScript(source: script)?.executeAndReturnError(&error)
+            let message = error?[NSAppleScript.errorMessage] as? String
+            let cancelled = (error?[NSAppleScript.errorNumber] as? Int) == -128
+            try? await Task.sleep(for: .seconds(3))
+            await MainActor.run {
+                self.installingDriver = false
+                if let message, !cancelled { self.videoSyncError = message }
+                self.videoSync.setEnabled(self.settings.videoSync)
+                self.objectWillChange.send()
+            }
+        }
+    }
+
+    @Published var videoSyncError: String?
 
     private func refreshLightDelay() {
         let d = computeLightDelay()
@@ -565,6 +638,7 @@ final class LightController: ObservableObject {
     }
 
     func shutdown() {
+        videoSync.shutdown()
         guard connected, settings.offOnQuit else { return }
         device.dropPendingFrame()
         device.sendNow([[Robobloq.Cmd.turnOff], Robobloq.solidBody(.black, ledCount: ledCount)])
@@ -640,6 +714,8 @@ final class LightController: ObservableObject {
             } else if let d = displays.first(where: { $0.name.lowercased().contains(arg) }) {
                 s.displayID = d.id
             } else { return reject(url) }
+        case "videosync":
+            s.videoSync = !["off", "0", "false"].contains(arg)
         case "blackbars":
             s.picture.blackBars = !["off", "0", "false"].contains(arg)
         case "settings":

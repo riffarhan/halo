@@ -32,7 +32,23 @@ Halo handles `halo://` links, so Shortcuts (an **Open URLs** action), Siri (run 
 | `halo://speed/70` | Effect speed |
 | `halo://display/lg`, `halo://display/main` | Follow a display (name match) |
 | `halo://blackbars/off` | Black bar detection on/off |
+| `halo://videosync/<on\|off>` | Bluetooth video sync on/off |
+| `halo://calibrate` | Measure the speaker delay |
 | `halo://settings` | Open the settings window |
+
+## Bluetooth video sync
+
+Bluetooth speakers play late, and macOS often underestimates by how much (Logi Z407: 352 ms measured, 123 ms reported), so video runs ahead of the sound. *Video sync* fixes this for players that honor Core Audio's device latency.
+
+How it works: a small audio driver (`Driver/HaloSync.c`, an AudioServerPlugIn) adds an output device called **Halo Sync**. When the default output is a Bluetooth speaker, Halo makes Halo Sync the default output, forwards its audio to the speaker (lock-free ring buffer with drift-correcting resampling, `Sources/HaloAudio/Forwarder.c`), and has the driver report the speaker's real end-to-end delay as its latency. Players delay the picture by that amount. Volume and mute are mirrored to the speaker. Turning it off, quitting, or disconnecting the speaker restores the normal output. *Measure speaker delay* measures through Halo Sync while routed, so the reported figure covers the whole path.
+
+Verified on a Logi Z407: 364 ms measured through Halo Sync (8/8 beeps, ±0). An AVPlayer test (beeps at known positions, heard by the mic, compared with the player's clock) put sound 13 ms behind the player clock with video sync on (≈ mic latency), and about 300 ms behind with it off.
+
+- **Works:** Safari, QuickTime Player, TV, IINA and other AVFoundation/Core Audio players.
+- **Doesn't help:** Chrome, Firefox and most games, which ignore device latency. The Bluetooth delay is unchanged there.
+- The orange microphone dot shows while routing: Halo reads Halo Sync's audio through its input side.
+
+Install the driver from Settings → *Video sync* → *Install driver*, or `Driver/install-driver.sh` (both ask for your password and restart Core Audio for a second). Remove it with `Driver/uninstall-driver.sh`.
 
 ## Hardware
 

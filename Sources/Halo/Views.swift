@@ -140,7 +140,10 @@ private struct MusicSection: View {
 
     private var syncHint: String {
         var parts: [String] = []
-        if let out = lights.outputDevice {
+        if let route = lights.videoSync.route {
+            parts.append(String(format: "Video sync: sound goes through Halo Sync to %@, %.0f ms late in total.",
+                                route.targetName, lights.videoSync.reportedLatencyMs))
+        } else if let out = lights.outputDevice {
             if let measured = lights.settings.measuredLatency[out.name] {
                 parts.append(String(format: "%@ plays sound %.0f ms late (measured).", out.name, measured))
             } else {
@@ -377,6 +380,8 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             } header: { Text("White balance") }
 
+            VideoSyncSection()
+
             Section {
                 ShortcutRow(url: "halo://toggle", note: "On / off")
                 ShortcutRow(url: "halo://mode/auto", note: "screen · music · auto · color · effect · pickup")
@@ -385,6 +390,7 @@ struct SettingsView: View {
                 ShortcutRow(url: "halo://music/pulse", note: "spectrum · pulse · screen")
                 ShortcutRow(url: "halo://effect/rainbow", note: "Built-in effect by name")
                 ShortcutRow(url: "halo://display/lg", note: "Follow a display by name, or main")
+                ShortcutRow(url: "halo://videosync/on", note: "Bluetooth video sync on / off")
                 Text("In Shortcuts, add an Open URLs action with one of these. Siri can then run that shortcut by name. From Terminal: open -g halo://toggle")
                     .font(.caption).foregroundStyle(.secondary)
             } header: { Text("Shortcuts & automation") }
@@ -409,6 +415,43 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(minWidth: 480, minHeight: 600)
+    }
+}
+
+private struct VideoSyncSection: View {
+    @EnvironmentObject private var lights: LightController
+
+    var body: some View {
+        Section {
+            Toggle("Keep video in sync with Bluetooth speakers", isOn: $lights.settings.videoSync)
+            if !lights.videoSync.driverInstalled {
+                HStack {
+                    Text("Needs the Halo Sync audio driver.").font(.callout)
+                    Spacer()
+                    Button(lights.installingDriver ? "Installing…" : "Install driver…") { lights.installVideoSyncDriver() }
+                        .disabled(lights.installingDriver)
+                }
+            } else if let route = lights.videoSync.route {
+                LabeledContent("Speaker", value: route.targetName)
+                LabeledContent("Delay told to apps", value: String(format: "%.0f ms%@", lights.videoSync.reportedLatencyMs,
+                                                                   lights.settings.videoSyncLatency[route.targetName] == nil ? " (estimated)" : " (measured)"))
+                LabeledContent("Forwarding buffer", value: String(format: "%.0f ms%@", lights.videoSync.bufferMs,
+                                                                  lights.videoSync.underruns > 0 ? " · \(lights.videoSync.underruns) dropouts" : ""))
+                Button(lights.calibrating ? "Measuring…" : "Measure delay (plays 8 beeps)") { lights.measureSpeaker() }
+                    .disabled(lights.calibrating)
+                if let msg = lights.calibrationMessage {
+                    Text(msg).font(.caption).foregroundStyle(.secondary)
+                }
+            } else if lights.settings.videoSync {
+                Text("Waiting for Bluetooth: it switches on when a Bluetooth speaker or headphones are the sound output.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            if let err = lights.videoSyncError ?? lights.videoSync.lastError {
+                Text(err).font(.caption).foregroundStyle(.orange)
+            }
+            Text("Bluetooth plays sound late but tells macOS a much smaller delay, so video runs ahead of the voices. With this on, Halo sends the sound through its Halo Sync device, which reports the real (measured) delay, so players hold the picture back to match. Works in Safari (YouTube, Netflix), QuickTime, TV, Music and IINA; Chrome and games ignore it. macOS shows the orange microphone dot while it runs, because Halo reads the sound back from Halo Sync. Halo never listens to the microphone except during Measure.")
+                .font(.caption).foregroundStyle(.secondary)
+        } header: { Text("Video sync (Bluetooth)") }
     }
 }
 

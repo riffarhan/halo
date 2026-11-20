@@ -5,6 +5,7 @@ let package = Package(
     name: "Halo",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "Halo", path: "Sources/Halo"),
+        .target(name: "HaloAudio", path: "Sources/HaloAudio"),
+        .executableTarget(name: "Halo", dependencies: ["HaloAudio"], path: "Sources/Halo"),
     ]
 )

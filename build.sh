@@ -13,6 +13,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Halo"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+# The Halo Sync audio driver travels inside the app; Settings → Video sync installs it.
+Driver/build-driver.sh >/dev/null
+cp -R "$SCRATCH/HaloSync.driver" "$APP/Contents/Resources/"
 xattr -cr "$APP"
 
 # Sign with the local "Halo Local Signing" certificate when it exists, so the Screen Recording and
