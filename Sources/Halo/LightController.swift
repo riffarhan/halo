@@ -54,6 +54,8 @@ struct Settings: Codable, Equatable {
     /// Music: calmer verses and breakdowns, bigger choruses and drops (judged from the last few seconds
     /// against the rest of the song).
     var songEnergy = true
+    /// Music: a short whitish flash across the top middle on each snare or clap.
+    var snareAccents = true
     /// Manual fine-tune added on top of the automatic speaker match (can be negative).
     var lightDelayMs = 0.0
     /// Hold Music lights back by the speaker's reported latency (Bluetooth plays sound late).
@@ -253,6 +255,7 @@ final class LightController: ObservableObject {
             spectrumMotion: settings.spectrumMotion,
             stereo: settings.stereo,
             songEnergy: settings.songEnergy,
+            snareAccents: settings.snareAccents,
             syncTest: syncTesting,
             lightDelayMs: effectiveLightDelayMs
         )
@@ -323,7 +326,7 @@ final class LightController: ObservableObject {
         if engine.isRunning, s.layout != o.layout || s.picture != o.picture || s.musicTuning != o.musicTuning
             || s.musicPalette != o.musicPalette
             || s.paletteFrom != o.paletteFrom || s.paletteTo != o.paletteTo || s.partyStrobe != o.partyStrobe || s.partyIntensity != o.partyIntensity
-            || s.spectrumMotion != o.spectrumMotion || s.stereo != o.stereo || s.songEnergy != o.songEnergy
+            || s.spectrumMotion != o.spectrumMotion || s.stereo != o.stereo || s.songEnergy != o.songEnergy || s.snareAccents != o.snareAccents
             || s.lightDelayMs != o.lightDelayMs || s.autoSpeakerSync != o.autoSpeakerSync {
             refreshLightDelay()
             engine.update(engineConfig)
@@ -769,6 +772,8 @@ final class LightController: ObservableObject {
         case "synctest":
             if ["off", "stop", "0"].contains(arg) { stopSyncTest() } else { startSyncTest() }
             return
+        case "snare":
+            s.snareAccents = !["off", "0", "false"].contains(arg)
         case "energy":
             s.songEnergy = !["off", "0", "false"].contains(arg)
         case "stereo":

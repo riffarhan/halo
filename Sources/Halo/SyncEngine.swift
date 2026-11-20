@@ -133,6 +133,8 @@ struct EngineConfig: Equatable {
     var stereo = true
     /// Music: effects scale with the song's energy (calmer verses, bigger choruses).
     var songEnergy = true
+    /// Music: a short whitish flash across the top middle on each snare or clap (no color change).
+    var snareAccents = true
     /// Sync test: include Halo's own audio and flash the strip white on every detected kick.
     var syncTest = false
     /// Hold music frames back by this much so they line up with speakers that play late (Bluetooth).
@@ -184,6 +186,8 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     private var recordLines: [String] = []
     private var recordStart = Date()
     private var ledXCache: [Double] = []
+    private var topWKey: LedLayout?
+    private var topWCache: [Double] = []
     private var spectrumHistory: [Double] = []
     private var partySeenBeat = 0
     private var partyBeats = 0
@@ -430,6 +434,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
                                count: max(1, config.layout.total))
             } else {
                 var raw = musicColors(style)
+                if config.snareAccents, style != .screen { raw = applySnare(raw, style: style) }
                 if config.stereo { raw = applyStereo(raw) }
                 colors = fadeMusic(raw, punch: style == .party ? partyIntensity : 0)
             }
@@ -624,7 +629,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
         q.async {
             self.recordStart = Date()
             self.recordUntil = Date().addingTimeInterval(seconds)
-            self.recordLines = ["t,beatCount,strength,bass,balance,beat,offset,energy,colors"]
+            self.recordLines = ["t,beatCount,strength,bass,balance,beat,offset,energy,snareCount,snareStats,colors"]
         }
     }
 
@@ -633,7 +638,8 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
         let rgb = colors.map { "\($0.r) \($0.g) \($0.b)" }.joined(separator: ";")
         recordLines.append(String(format: "%.4f,%d,%.3f,%.3f,%.3f,%.3f,%.4f,", now.timeIntervalSince(recordStart),
                                   audio.beatCount, audio.beatStrength, audio.bass, audio.balance, audio.beat,
-                                  spectrumOffset) + String(format: "%.3f,", audio.energy) + rgb)
+                                  spectrumOffset) + String(format: "%.3f,%d,%.2f/%.2f/%.3f,", audio.energy, audio.snareCount, audio.lastSnareStats.peak,
+                                                audio.lastSnareStats.hat, audio.lastSnareStats.kick) + rgb)
         if let until = recordUntil, now >= until {
             recordUntil = nil
             let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Halo-build")
@@ -648,6 +654,37 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
 
     /// Party intensity as set. Song energy doesn't change it: at 100, Party stays the original club look.
     private var partyIntensity: Double { min(max(config.partyIntensity / 100, 0), 1) }
+
+    /// How much each LED takes part in snare accents: 1 at the top centre, fading to 0 by ~35 % either side
+    /// along the top; 0 on the sides and bottom.
+    private func topWeights(_ layout: LedLayout) -> [Double] {
+        if topWKey == layout, topWCache.count == layout.total { return topWCache }
+        var L = layout
+        if L.start == .bottomRight { swap(&L.left, &L.right) }
+        var w = [Double](repeating: 0, count: L.total)
+        for k in 0 ..< L.top {
+            let x = (Double(k) + 0.5) / Double(L.top)
+            w[L.left + k] = max(0, 1 - abs(x - 0.5) / 0.35)
+        }
+        topWKey = layout; topWCache = w
+        return w
+    }
+
+    /// Snare/clap: the top middle flashes toward white for ~0.1 s. It doesn't touch colors or the kick's
+    /// effects, so the eye reads kick ("boom") and snare ("tak") as different things, like the ear does.
+    private func applySnare(_ colors: [RGB], style: MusicStyle) -> [RGB] {
+        guard audio.snare > 0.02 else { return colors }
+        let ws = topWeights(config.layout)
+        guard ws.count == colors.count else { return colors }
+        let styleScale = style == .party ? 0.4 + 0.6 * partyIntensity : energyScale
+        let amount = min(1, audio.snare * 0.6 * styleScale)
+        return zip(colors, ws).map { c, w in
+            let a = amount * w
+            guard a > 0.005 else { return c }
+            func up(_ v: UInt8) -> UInt8 { UInt8(min(255, Double(v) + (255 - Double(v)) * a)) }
+            return RGB(r: up(c.r), g: up(c.g), b: up(c.b))
+        }
+    }
 
     /// Horizontal position of each LED as seen from the front: 0 = left edge, 1 = right edge.
     private func ledX(_ layout: LedLayout) -> [Double] {

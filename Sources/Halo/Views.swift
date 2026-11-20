@@ -99,6 +99,9 @@ private struct MusicSection: View {
                 .pickerStyle(.segmented)
                 Text(motionCaption).font(.caption2).foregroundStyle(.secondary)
             }
+            Toggle("Snare/clap accents", isOn: $lights.settings.snareAccents)
+            Text("Kicks drive the colors; each snare or clap adds a short white flash across the top middle.")
+                .font(.caption2).foregroundStyle(.secondary)
             Toggle("Follow song energy", isOn: $lights.settings.songEnergy)
             Text("Calmer in verses and breakdowns, bigger in choruses and drops.")
                 .font(.caption2).foregroundStyle(.secondary)
