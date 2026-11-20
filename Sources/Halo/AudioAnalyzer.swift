@@ -18,7 +18,7 @@ final class AudioAnalyzer {
     /// 0...1 how hard the latest kick hit compared with the loudest recent ones. Starts at the kick's onset
     /// and keeps rising for its first ~60 ms, until the kick peaks.
     private(set) var beatStrength = 0.0
-    /// 0...1 continuous bass level (the kick band relative to its recent peak): fast attack, ~0.2 s release.
+    /// 0...1 continuous bass level (the kick band relative to its recent peak): fast attack, ~80 ms release.
     private(set) var bass = 0.0
     /// -1 (all left) ... 0 (centered) ... +1 (all right): the left/right level difference, ±12 dB = ±1, smoothed.
     private(set) var balance = 0.0
@@ -205,7 +205,7 @@ final class AudioAnalyzer {
             bassPeak = max(e, bassPeak * 0.9995)
             sinceBeat += Double(end - start) / sampleRate
             let rel = e > 0.002 && bassPeak > 0 ? min(e / bassPeak, 1) : 0
-            bass = rel > bass ? bass + (rel - bass) * 0.5 : bass * 0.975 + rel * 0.025
+            bass = rel > bass ? bass + (rel - bass) * 0.5 : bass * 0.94 + rel * 0.06
             kickRef = max(e, kickRef * 0.99983)
             let strength = e > 0.002 && kickRef > 0 ? min(e / kickRef, 1) : 0
             if sinceBeat < 0.08 { beatStrength = max(beatStrength, strength); lastBeatPeak = max(lastBeatPeak, e) }

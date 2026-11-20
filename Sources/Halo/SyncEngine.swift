@@ -460,6 +460,8 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             advanceSpectrumMotion()
             let bands = audio.bands
             let stops = config.palette
+            // Beat/Wave: every kick lifts the whole strip briefly (no color flash), fading in ~0.2 s.
+            let lift = config.spectrumMotion == .beat || config.spectrumMotion == .wave ? audio.beat * 0.45 : 0
             // Wave: the bass end shows the newest colors and the treble end what the bass end showed ~0.6 s ago,
             // so every kick travels along the strip.
             let travel = config.spectrumMotion == .wave ? Double(max(5, config.picture.fps)) * 0.6 : 0
@@ -468,7 +470,8 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
                 let offset = pastSpectrumOffset(framesAgo: p * travel)
                 let f = p * Double(bands.count - 1)
                 let lo = Int(f), hi = min(lo + 1, bands.count - 1)
-                let level = pow(bands[lo] + (bands[hi] - bands[lo]) * (f - Double(lo)), 1.4)
+                let raw = pow(bands[lo] + (bands[hi] - bands[lo]) * (f - Double(lo)), 1.4)
+                let level = raw + (1 - raw) * lift
                 // Mirrored wrap (period 2): equals p when offset is 0 and never jumps from the last color to the first.
                 let y = ((p + offset) / 2).truncatingRemainder(dividingBy: 1)
                 let c = MusicPalette.sample(stops, 1 - abs(1 - 2 * y))
@@ -496,7 +499,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     /// Moves the Spectrum palette along the strip. Beat and Wave are driven by the bass: the palette flows
     /// while bass plays (faster the heavier it is, still in quiet parts) and jumps on every kick by how hard
     /// it hits (a soft kick barely, a heavy one by half the palette; 1.4× on every 4th beat), gliding in
-    /// over ~0.15 s.
+    /// over ~2 frames.
     private func advanceSpectrumMotion() {
         switch config.spectrumMotion {
         case .off:
@@ -518,7 +521,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
                 spectrumApplied = s
             }
         }
-        spectrumOffset += (spectrumTarget - spectrumOffset) * 0.3
+        spectrumOffset += (spectrumTarget - spectrumOffset) * 0.5
         spectrumHistory.append(spectrumOffset)
         if spectrumHistory.count > 90 { spectrumHistory.removeFirst(spectrumHistory.count - 90) }
         // The mirrored wrap repeats every 2, so keep the numbers small without a visible change.
@@ -564,12 +567,12 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             let x = (Double(k) * 0.381966).truncatingRemainder(dividingBy: 1)
             return MusicPalette.sample(stops, stops.count == 2 ? Double(k % 2) : x)
         }
-        // Hits land as hard as the kick (a soft one ~45 %, the hardest full), and between kicks the strip
-        // pumps with the bass line instead of sitting at a flat glow.
-        let hit = audio.beat * (0.45 + 0.55 * audio.beatStrength) * (0.3 + 0.7 * intensity)
+        // Hits land at full strength the moment the kick starts (kick strength is only known ~80 ms later,
+        // too late for the flash). Between kicks a thin glow follows the bass line, kept low so hits stand out.
+        let hit = audio.beat * (0.3 + 0.7 * intensity)
         let soft = 1 - intensity
         let floorLevel = 0.5 * soft * (0.7 + 0.3 * audio.bass)
-        let glow = max(0.04 + 0.1 * audio.loudness + 0.4 * audio.bass * audio.bass, floorLevel)
+        let glow = max(0.04 + 0.12 * audio.loudness + 0.15 * audio.bass * audio.bass, floorLevel)
         let lit = glow + hit * (1 - glow)
         let dim = 0.5 + 0.5 * soft                              // how bright the unlit parts of a pattern stay
         let since = now.timeIntervalSince(partyBeatTime)
@@ -609,7 +612,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
         q.async {
             self.recordStart = Date()
             self.recordUntil = Date().addingTimeInterval(seconds)
-            self.recordLines = ["t,beatCount,strength,bass,balance,loudness,offset,colors"]
+            self.recordLines = ["t,beatCount,strength,bass,balance,beat,offset,colors"]
         }
     }
 
@@ -617,7 +620,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
         let now = Date()
         let rgb = colors.map { "\($0.r) \($0.g) \($0.b)" }.joined(separator: ";")
         recordLines.append(String(format: "%.4f,%d,%.3f,%.3f,%.3f,%.3f,%.4f,", now.timeIntervalSince(recordStart),
-                                  audio.beatCount, audio.beatStrength, audio.bass, audio.balance, audio.loudness,
+                                  audio.beatCount, audio.beatStrength, audio.bass, audio.balance, audio.beat,
                                   spectrumOffset) + rgb)
         if let until = recordUntil, now >= until {
             recordUntil = nil
@@ -679,7 +682,11 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             for k in 0 ..< 3 {
                 let j = i * 3 + k
                 let old = musicFade[j], new = channels[k]
-                musicFade[j] = old + (new - old) * (new > old ? attack : release)
+                // Big rises (a kick) land at once whatever the smoothness; only small wobbles are smoothed,
+                // so high smoothness removes flicker without making beats late.
+                let rise = new - old
+                let a = rise > 0 ? attack + (1 - attack) * min(1, rise / 50) : release
+                musicFade[j] = old + rise * a
                 channels[k] = musicFade[j]
             }
             let peak = channels.max() ?? 0
