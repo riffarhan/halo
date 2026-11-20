@@ -22,6 +22,11 @@ final class AudioAnalyzer {
     private(set) var bass = 0.0
     /// -1 (all left) ... 0 (centered) ... +1 (all right): the left/right level difference, ±12 dB = ±1, smoothed.
     private(set) var balance = 0.0
+    /// 0 = the calmest part of the song so far (intro, verse, breakdown) ... 1 = its biggest (chorus, drop).
+    /// The last ~3 s of loudness and bass, measured against the biggest part heard so far. The first verse
+    /// can read high until the first chorus shows how big the song gets.
+    private(set) var energy = 0.5
+    private var energyShort = 0.0, energyHi = 0.0, energyReady = false
 
     /// Higher = reacts to quieter sound. 0...100.
     var sensitivity = 50.0
@@ -68,7 +73,8 @@ final class AudioAnalyzer {
 
     func reset() {
         bands = [Double](repeating: 0, count: Self.bandCount)
-        loudness = 0; beat = 0; beatStrength = 0; bass = 0; balance = 0; kickRef = 0; lastBeatPeak = 0
+        loudness = 0; beat = 0; beatStrength = 0; bass = 0; balance = 0; kickRef = 0
+        energy = 0.5; energyReady = false; lastBeatPeak = 0
         blockSums = [Float](repeating: 0, count: 4); blockCounts = [Int](repeating: 0, count: 4)
         bassRecent = [Double](repeating: 0, count: 8); ring.removeAll(keepingCapacity: true)
     }
@@ -140,6 +146,7 @@ final class AudioAnalyzer {
         loudPeak = max(loudDb, loudPeak - 0.04, -60)
         let loudTarget = silent ? 0 : clamp((loudDb - (loudPeak - range)) / range)
         loudness = smooth(loudness, loudTarget)
+        if !silent { updateEnergy(loudDb: loudDb, seconds: Double(samples.count) / sampleRate) }
 
         // Spectrum
         var windowed = [Float](repeating: 0, count: n)
@@ -226,6 +233,23 @@ final class AudioAnalyzer {
             bassSlow = bassSlow == 0 ? e : bassSlow * 0.985 + e * 0.015
             start = end
         }
+    }
+
+    private func updateEnergy(loudDb: Double, seconds: Double) {
+        // Mix in the kick band so a chorus with a fuller low end counts as bigger even at equal loudness.
+        // (Kept within 30 dB of the overall level: a missing low end, or the first buffers before the kick
+        // tracker has a value, would otherwise drag the score down by tens of dB.)
+        let bassDb = max(20 * log10(bassSlow + 1e-9), loudDb - 30)
+        let score = 0.6 * loudDb + 0.4 * bassDb
+        if !energyReady {
+            // Until the song shows its range, assume its biggest part is ~5 dB above where it starts.
+            energyShort = score; energyHi = score + 5; energyReady = true
+        }
+        energyShort += (score - energyShort) * (1 - exp(-seconds / 3))
+        // The biggest part heard so far: rises at once, forgets by 3 dB a minute (next song, quieter track).
+        energyHi = max(energyShort, energyHi - seconds * 0.05)
+        // At that level → 1; 9 dB or more below it → 0.
+        energy = clamp(1 - (energyHi - energyShort) / 9)
     }
 
     /// Left/right balance in dB, mapped so ±12 dB is ±1. Silence and mono drift back to centered.

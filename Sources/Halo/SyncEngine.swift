@@ -131,6 +131,10 @@ struct EngineConfig: Equatable {
     var spectrumMotion: SpectrumMotion = .beat
     /// Music: dim the side of the strip away from the louder stereo channel.
     var stereo = true
+    /// Music: effects scale with the song's energy (calmer verses, bigger choruses).
+    var songEnergy = true
+    /// Sync test: include Halo's own audio and flash the strip white on every detected kick.
+    var syncTest = false
     /// Hold music frames back by this much so they line up with speakers that play late (Bluetooth).
     var lightDelayMs = 0.0
 }
@@ -206,7 +210,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     /// Starts capture, or just updates settings when the running stream already fits.
     @MainActor
     func run(displayID: CGDirectDisplayID?, config: EngineConfig) async throws {
-        let key = "\(displayID ?? 0)-\(config.picture.fps)-\(config.render.needsAudio)"
+        let key = "\(displayID ?? 0)-\(config.picture.fps)-\(config.render.needsAudio)-\(config.syncTest)"
         if stream != nil, key == runningKey {
             update(config)
             return
@@ -230,7 +234,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         if config.render.needsAudio {
             cfg.capturesAudio = true
-            cfg.excludesCurrentProcessAudio = true
+            cfg.excludesCurrentProcessAudio = !config.syncTest
             cfg.sampleRate = 48000
             cfg.channelCount = 2
         }
@@ -419,9 +423,16 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             colors = c
         case .music(let style):
             audio.decay()
-            var raw = musicColors(style)
-            if config.stereo { raw = applyStereo(raw) }
-            colors = fadeMusic(raw, punch: style == .party ? min(max(config.partyIntensity / 100, 0), 1) : 0)
+            if config.syncTest {
+                // Sharp white blip per kick, no fades, so its timing against the sound is easy to judge.
+                let v = pow(audio.beat, 3)
+                colors = [RGB](repeating: RGB(r: UInt8(255 * v), g: UInt8(255 * v), b: UInt8(255 * v)),
+                               count: max(1, config.layout.total))
+            } else {
+                var raw = musicColors(style)
+                if config.stereo { raw = applyStereo(raw) }
+                colors = fadeMusic(raw, punch: style == .party ? partyIntensity : 0)
+            }
             if recordUntil != nil { recordFrame(colors) }
             let now = Date()
             if now.timeIntervalSince(lastStats) > 1 {
@@ -460,8 +471,10 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             advanceSpectrumMotion()
             let bands = audio.bands
             let stops = config.palette
-            // Beat/Wave: every kick lifts the whole strip briefly (no color flash), fading in ~0.2 s.
-            let lift = config.spectrumMotion == .beat || config.spectrumMotion == .wave ? audio.beat * 0.45 : 0
+            // Beat/Wave: every kick lifts the whole strip at once (no color flash); a deep, hard kick then
+            // blooms further over the next ~2 frames as its strength comes in. Bigger in a chorus.
+            let lift = config.spectrumMotion == .beat || config.spectrumMotion == .wave
+                ? min(0.9, audio.beat * (0.4 + 0.45 * audio.beatStrength * audio.beatStrength) * energyScale) : 0
             // Wave: the bass end shows the newest colors and the treble end what the bass end showed ~0.6 s ago,
             // so every kick travels along the strip.
             let travel = config.spectrumMotion == .wave ? Double(max(5, config.picture.fps)) * 0.6 : 0
@@ -481,7 +494,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             // Whole strip breathes with the music; the color moves along the palette on every beat.
             hue = (hue + 0.0008).truncatingRemainder(dividingBy: 1)
             let t = hue + Double(audio.beatCount % 8) / 8
-            let v = 0.06 + 0.94 * max(audio.beat, audio.loudness * 0.75)
+            let v = 0.06 + 0.94 * max(min(1, audio.beat * energyScale), audio.loudness * 0.75)
             let stops = config.palette
             return (0 ..< n).map { i in
                 // Triangle wave so the color sweeps back and forth instead of jumping from the last stop to the first.
@@ -507,7 +520,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
         case .flow:
             spectrumTarget += 0.0015
         case .beat, .wave:
-            spectrumTarget += 0.0004 + 0.012 * audio.bass * audio.bass
+            spectrumTarget += (0.0004 + 0.012 * audio.bass * audio.bass) * energyScale
             if audio.beatCount != spectrumSeenBeat {
                 spectrumSeenBeat = audio.beatCount
                 spectrumBeats += 1
@@ -517,7 +530,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             let s = audio.beatStrength
             if s > spectrumApplied {
                 let accent = spectrumBeats % 4 == 0 ? 1.4 : 1
-                spectrumTarget += 0.5 * (s * s - spectrumApplied * spectrumApplied) * accent
+                spectrumTarget += 0.5 * (s * s - spectrumApplied * spectrumApplied) * accent * energyScale
                 spectrumApplied = s
             }
         }
@@ -545,7 +558,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     /// each beat, the strip never drops to dark, and kicks only lift the brightness a little.
     private func partyColors(_ n: Int) -> [RGB] {
         let now = Date()
-        let intensity = min(max(config.partyIntensity / 100, 0), 1)
+        let intensity = partyIntensity
         if audio.beatCount != partySeenBeat {
             partySeenBeat = audio.beatCount
             partyBeats += 1
@@ -612,7 +625,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
         q.async {
             self.recordStart = Date()
             self.recordUntil = Date().addingTimeInterval(seconds)
-            self.recordLines = ["t,beatCount,strength,bass,balance,beat,offset,colors"]
+            self.recordLines = ["t,beatCount,strength,bass,balance,beat,offset,energy,colors"]
         }
     }
 
@@ -621,7 +634,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
         let rgb = colors.map { "\($0.r) \($0.g) \($0.b)" }.joined(separator: ";")
         recordLines.append(String(format: "%.4f,%d,%.3f,%.3f,%.3f,%.3f,%.4f,", now.timeIntervalSince(recordStart),
                                   audio.beatCount, audio.beatStrength, audio.bass, audio.balance, audio.beat,
-                                  spectrumOffset) + rgb)
+                                  spectrumOffset) + String(format: "%.3f,", audio.energy) + rgb)
         if let until = recordUntil, now >= until {
             recordUntil = nil
             let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/Halo-build")
@@ -629,6 +642,15 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             try? recordLines.joined(separator: "\n").write(to: dir.appendingPathComponent("frames.csv"), atomically: true, encoding: .utf8)
             recordLines = []
         }
+    }
+
+    /// How big the beat effects are right now: 0.55 in the calmest part of the song, 1.45 in its biggest.
+    private var energyScale: Double { config.songEnergy ? 0.55 + 0.9 * audio.energy : 1 }
+
+    /// Party intensity after song energy: verses play softer than the setting, choruses at it.
+    private var partyIntensity: Double {
+        let set = min(max(config.partyIntensity / 100, 0), 1)
+        return config.songEnergy ? set * (0.45 + 0.55 * audio.energy) : set
     }
 
     /// Horizontal position of each LED as seen from the front: 0 = left edge, 1 = right edge.

@@ -98,6 +98,13 @@ final class RobobloqDevice: @unchecked Sendable {
         frameLock.lock(); pendingFrame = nil; frameLock.unlock()
     }
 
+    /// How long writing one frame over USB takes, ms (smoothed). The strip shows a frame once it's all written.
+    var frameWriteMs: Double {
+        frameLock.lock(); defer { frameLock.unlock() }
+        return writeMs
+    }
+    private var writeMs = 8.0   // frameLock
+
     private func flushFrame() {
         frameLock.lock()
         let payload = pendingFrame
@@ -105,9 +112,12 @@ final class RobobloqDevice: @unchecked Sendable {
         frameScheduled = false
         frameLock.unlock()
         guard let payload, let device = ioDevice else { return }
+        let start = DispatchTime.now().uptimeNanoseconds
         for report in Robobloq.longPacket(command: Robobloq.Cmd.syncScreen, payload: payload, index: nextIndex()) {
             write(device, report)
         }
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6
+        frameLock.lock(); writeMs = writeMs * 0.95 + ms * 0.05; frameLock.unlock()
     }
 
     private func writeShort(_ body: [UInt8]) {

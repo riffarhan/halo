@@ -51,6 +51,9 @@ struct Settings: Codable, Equatable {
     var spectrumMotion: SpectrumMotion = .beat
     /// Music: the side of the strip away from the louder stereo channel dims.
     var stereo = true
+    /// Music: calmer verses and breakdowns, bigger choruses and drops (judged from the last few seconds
+    /// against the rest of the song).
+    var songEnergy = true
     /// Manual fine-tune added on top of the automatic speaker match (can be negative).
     var lightDelayMs = 0.0
     /// Hold Music lights back by the speaker's reported latency (Bluetooth plays sound late).
@@ -239,7 +242,7 @@ final class LightController: ObservableObject {
 
     private var engineConfig: EngineConfig {
         EngineConfig(
-            render: settings.mode == .music ? .music(settings.musicStyle) : .screen,
+            render: settings.mode == .music || syncTesting ? .music(settings.musicStyle) : .screen,
             layout: settings.layout,
             picture: settings.picture,
             musicSensitivity: settings.tuning.sensitivity,
@@ -249,6 +252,8 @@ final class LightController: ObservableObject {
             partyIntensity: settings.partyIntensity,
             spectrumMotion: settings.spectrumMotion,
             stereo: settings.stereo,
+            songEnergy: settings.songEnergy,
+            syncTest: syncTesting,
             lightDelayMs: effectiveLightDelayMs
         )
     }
@@ -318,7 +323,7 @@ final class LightController: ObservableObject {
         if engine.isRunning, s.layout != o.layout || s.picture != o.picture || s.musicTuning != o.musicTuning
             || s.musicPalette != o.musicPalette
             || s.paletteFrom != o.paletteFrom || s.paletteTo != o.paletteTo || s.partyStrobe != o.partyStrobe || s.partyIntensity != o.partyIntensity
-            || s.spectrumMotion != o.spectrumMotion || s.stereo != o.stereo
+            || s.spectrumMotion != o.spectrumMotion || s.stereo != o.stereo || s.songEnergy != o.songEnergy
             || s.lightDelayMs != o.lightDelayMs || s.autoSpeakerSync != o.autoSpeakerSync {
             refreshLightDelay()
             engine.update(engineConfig)
@@ -471,11 +476,15 @@ final class LightController: ObservableObject {
         var d = settings.lightDelayMs
         if settings.autoSpeakerSync, let out = outputDevice {
             // Sound is heard `speaker` ms after it plays; Halo already sees it `audioLatencyMs` after,
-            // and the USB write to the strip takes a few more ms. Through Halo Sync, the delay it reports is
+            // and writing a frame to the strip takes `frameWriteMs` (measured). What the controller itself
+            // adds can't be measured from here: the Sync test lets you line it up by eye (Fine-tune). Through Halo Sync, the delay it reports is
             // the whole path to the speaker.
             let speaker = videoSync.route != nil ? videoSync.reportedLatencyMs
                 : settings.measuredLatency[out.name] ?? out.latencyMs
-            d += speaker - max(0, audioLatencyMs ?? 0) - 8
+            d += speaker - max(0, audioLatencyMs ?? 0) - device.frameWriteMs
+            UserDefaults.standard.set(String(format: "speaker %.0f − audio arrives %.0f − USB write %.1f + fine-tune %.0f = %.0f ms",
+                                             speaker, max(0, audioLatencyMs ?? 0), device.frameWriteMs, settings.lightDelayMs, d),
+                                      forKey: "debug.lightDelay")
         }
         return max(0, d)
     }
@@ -483,6 +492,39 @@ final class LightController: ObservableObject {
     // MARK: Speaker measurement
 
     @Published private(set) var calibrating = false
+    /// Sync test running: Halo plays kicks and flashes the strip white through the normal music path.
+    @Published private(set) var syncTesting = false
+    /// Measured time to write one frame to the strip over USB, ms.
+    var frameWriteMs: Double { device.frameWriteMs }
+    private var syncTestPlayer: SyncTestPlayer?
+    private var syncTestStop: Task<Void, Never>?
+
+    /// Plays a kick every 0.6 s for `seconds` and flashes the strip white on each one, through the same
+    /// capture → beat detection → delay path as music, so Fine-tune can be set until both land together.
+    func startSyncTest(seconds: Double = 30) {
+        guard !syncTesting else { return }
+        syncTesting = true
+        apply()
+        let player = SyncTestPlayer()
+        syncTestPlayer = player
+        // Give the capture stream a moment to restart with Halo's own audio included.
+        syncTestStop = Task {
+            try? await Task.sleep(for: .milliseconds(800))
+            if Task.isCancelled { return }
+            player.start()
+            try? await Task.sleep(for: .seconds(seconds))
+            if Task.isCancelled { return }
+            stopSyncTest()
+        }
+    }
+
+    func stopSyncTest() {
+        guard syncTesting else { return }
+        syncTestStop?.cancel(); syncTestStop = nil
+        syncTestPlayer?.stop(); syncTestPlayer = nil
+        syncTesting = false
+        apply()
+    }
     @Published private(set) var calibrationMessage: String?
 
     /// Plays 8 beeps on the current speaker and times them with the built-in microphone.
@@ -644,6 +686,7 @@ final class LightController: ObservableObject {
     }
 
     func shutdown() {
+        syncTestPlayer?.stop()
         videoSync.shutdown()
         guard connected, settings.offOnQuit else { return }
         device.dropPendingFrame()
@@ -723,6 +766,11 @@ final class LightController: ObservableObject {
         case "intensity":
             guard let v = number(0 ... 100) else { return reject(url) }
             s.partyIntensity = v
+        case "synctest":
+            if ["off", "stop", "0"].contains(arg) { stopSyncTest() } else { startSyncTest() }
+            return
+        case "energy":
+            s.songEnergy = !["off", "0", "false"].contains(arg)
         case "stereo":
             s.stereo = !["off", "0", "false"].contains(arg)
         case "videosync":

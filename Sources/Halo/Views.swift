@@ -99,6 +99,9 @@ private struct MusicSection: View {
                 .pickerStyle(.segmented)
                 Text(motionCaption).font(.caption2).foregroundStyle(.secondary)
             }
+            Toggle("Follow song energy", isOn: $lights.settings.songEnergy)
+            Text("Calmer in verses and breakdowns, bigger in choruses and drops.")
+                .font(.caption2).foregroundStyle(.secondary)
             Toggle("Follow stereo (left/right)", isOn: $lights.settings.stereo)
             Text("When the music leans left or right, the other side of the strip dims.")
                 .font(.caption2).foregroundStyle(.secondary)
@@ -125,6 +128,13 @@ private struct MusicSection: View {
                           value: $lights.settings.lightDelayMs,
                           range: lights.settings.autoSpeakerSync ? -150 ... 250 : 0 ... 400, format: "%+.0f ms")
             Text(syncHint).font(.caption2).foregroundStyle(.secondary)
+            Button(lights.syncTesting ? "Stop sync test" : "Sync test (kicks + white flashes, 30 s)") {
+                lights.syncTesting ? lights.stopSyncTest() : lights.startSyncTest()
+            }
+            if lights.syncTesting {
+                Text("Move the slider above while it runs until each flash lands with its kick. Light late → slide left; light early → slide right.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             if lights.settings.autoSpeakerSync {
                 Button(lights.calibrating ? "Measuring…" : "Measure speaker delay (plays 8 beeps)") { lights.measureSpeaker() }
                     .disabled(lights.calibrating)
@@ -161,8 +171,9 @@ private struct MusicSection: View {
         if let ms = lights.audioLatencyMs {
             parts.append(String(format: "Audio reaches Halo after %.0f ms.", max(0, ms)))
         }
+        parts.append(String(format: "Writing a frame to the strip takes %.0f ms.", lights.frameWriteMs))
         parts.append(String(format: "Lights held back %.0f ms.", lights.effectiveLightDelayMs))
-        parts.append("Lights before the beat → slide right. Lights after it → slide left.")
+        parts.append("Lights before the beat → slide right. Lights after it → slide left. Sync test (pause your music first) makes it easy to judge.")
         return parts.joined(separator: " ")
     }
 
