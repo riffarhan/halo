@@ -5,13 +5,55 @@ A small macOS menu-bar app for the AKKLED monitor backlight strip. It replaces t
 | Mode | What it does |
 |---|---|
 | **Screen** | Mirrors the edges of the chosen display at about 30 fps. Black bars (letterbox/pillarbox) are skipped, so the side LEDs keep showing the picture: an edge column counts as a bar once it has stayed pure black (≤12) for about a second in the middle of the frame, which ignores player titles and controls. Bars are taken as equal pairs at the narrower side's width, and only realistic sizes count (3–30 % per side, 3–25 % top/bottom). Verified with a synthetic 16:9-on-21:9 test: bars read 26 columns against 27.5 expected, and held through dark edges and dark scenes. Diagnostics: `defaults read local.halo.backlight debug.blackBars`. |
-| **Music** | Follows the Mac's audio output: *Spectrum* (bass left → treble right), *Pulse* (breathes with the music, color steps on each beat), *Party* (club lights: a new color per beat, a new pattern every 16 beats, full hits on every kick; *Intensity* runs from 100 = the original club look with hard cuts and optional strobe down to Soft = colors crossfade on the beat and the strip never goes dark) or *Screen* (screen colors, brightness follows the music). Spectrum can move its palette along the strip (*Color motion*: Off; Flow = slow drift; Beat = follows the bass: every kick lifts the whole strip's brightness for ~0.2 s (no color flash), the palette flows while bass plays, faster the heavier it is, and jumps on every kick by how hard it hits, measured against the loudest kicks of the last ~20 s, with a bigger jump every 4th beat; Wave = Beat, but each kick's colors start at the bass end and travel across the strip in ~0.6 s). *Snare/clap accents*: a sharp hit in 1–4.5 kHz that's at least as strong as the band above 6 kHz (hi-hats), loud next to the song's kicks, and not followed by a kick within 30 ms (a kick's beater click reaches that band first) flashes the top middle of the strip toward white for ~0.1 s, without changing colors, so kick and snare read as different hits. Tested on synthetic drum loops: snare 10/10, clap 10/10, snare under loud hats 10/10, hats alone 0, kick-only loops 0 false snares. *Follow song energy* scales the beat effects with the part of the song: the last ~3 s of loudness and bass against the biggest part heard so far (forgetting 3 dB a minute), so verses and breakdowns play calmer (×0.55) and choruses and drops bigger (×1.45). Party is left as set, so Intensity 100 is always the original club look. In a synthetic song, verse 2 read 0.12 and choruses 1.0; the first verse can read high until the first chorus shows the song's range. Deep, hard kicks bloom further over the ~2 frames after the hit. *Follow stereo* dims the side of the strip away from the louder channel (up to 85 % at 12 dB difference), so music panned left or right lights that side. Spectrum, Pulse and Party take a color palette (Rainbow, Fire, Ocean, Neon, Sunset, Forest, Ice, or a custom two-color gradient). Each style keeps its own sensitivity and smoothness. Smoothness only softens small wobbles and how lights fade out; a rise as big as a kick lands in the same frame, so high smoothness doesn't make beats late. Beats are detected straight from the samples (~5 ms steps, level measured over one ~21 ms bass cycle) and rendered immediately. A kick must rise sharply and beat the fading peak of the previous one, so a long or wobbling 808 note counts once. Tested: realistic 808 notes 4/4, alternating loud/half kicks 8/8, kicks every 0.25 s 12/12. Diagnostics: `open -g halo://record/15` writes 15 s of audio features and LED colors to `~/Library/Caches/Halo-build/frames.csv`. Lights are held back to match the speaker: by default by the latency macOS reports, or by a microphone measurement (*Measure speaker delay* plays 8 beeps and finds them in the built-in mic's recording with a matched filter), plus a manual fine-tune. The delay is `speaker − time for audio to reach Halo − USB write time (measured, ~7 ms)`; what the strip's controller adds can't be measured from the Mac, so *Sync test* plays a kick every 0.6 s and flashes the strip white through the same capture → beat detection → delay path as music (including Halo's own audio only during the test). Move Fine-tune until flash and kick land together. Diagnostics: `defaults read local.halo.backlight debug.lightDelay`. Bluetooth speakers often play later than macOS reports: a Logi Z407 measured 352 ms against 123 ms reported. |
-| **Auto** | Screen sync while another app is fullscreen on the chosen display (video, game), otherwise a warm ambient color |
+| **Music** | Follows the Mac's audio: pick a preset (*Chill*, *Groove*, *Party*, *Club*), see [Music](#music) |
+| **Auto** | A fullscreen window on the chosen display (video, game) → screen sync; otherwise another app playing sound → Music; otherwise a warm ambient color |
 | **Color** | One solid color |
 | **Effect** | The controller's 7 built-in animations, with speed control |
-| **Pickup** | The controller's 7 sound-reactive effects, using its own microphone |
 
 Also included: per-display selection, white balance with a live white preview, brightness, launch at login, lights off on sleep or quit, and a layout test pattern. Opening Halo again from Finder or Spotlight opens its settings window.
+
+## Music
+
+Pick a preset; everything else lives under *Advanced* and *Speaker sync*. A preset sets how the lights react (style, motion, accents, tuning); palette, strobe and speaker sync stay as you set them. Changing anything under Advanced shows the preset as **Custom**, so no setting can quietly change how a preset looks.
+
+| Preset | Look |
+|---|---|
+| **Chill** | Spectrum, colors drift slowly. No flashes. |
+| **Groove** | Spectrum following the bass: colors jump on kicks, snares flash the top, hi-hats shimmer on the treble side. |
+| **Party** | Party patterns at intensity 50: colors crossfade on the beat, the strip never goes dark. |
+| **Club** | The original Party: hard hits, a new color every kick, a new pattern every phrase (+ snare flashes). |
+
+### Styles and options (Advanced)
+
+- **Spectrum**: bass on LED 1 (bottom-left) through treble at the last LED. *Color motion*:
+  - **Flow**: slow drift.
+  - **Beat**: every kick lifts the whole strip at once, a hard one blooming further over ~2 frames. The palette flows while bass plays and jumps on each kick by how hard it hits (against the loudest kicks of the last ~20 s), with a bigger jump every 4th beat.
+  - **Wave**: Beat, but each kick's colors start at the bass end and travel across in ~0.6 s.
+- **Party**: a new color per kick and a new pattern each 16-beat phrase of the tempo grid, or at once when the song moves to a new section. *Intensity* runs from 100 (the original: hard cuts, optional strobe) down to soft (crossfades, never dark).
+- **Screen**: screen colors, brightness follows the music.
+- **Snare/clap accents**: the top middle flashes toward white for ~0.1 s, without changing colors, so kick ("boom") and snare ("tak") read as different hits.
+- **Hi-hat shimmer**: three LEDs at the treble end sparkle faintly on each hat.
+- **Follow song energy** (Spectrum): beat effects ×0.55 in verses and breakdowns, ×1.45 in choruses and drops.
+- **Follow stereo**: the side away from the louder channel dims (up to 85 % at 12 dB).
+- Palettes: Rainbow, Fire, Ocean, Neon, Sunset, Forest, Ice, or a custom two-color gradient. Each style keeps its own sensitivity and smoothness. Smoothness only softens small wobbles and fades; a rise as big as a kick lands in the same frame.
+
+The settings window shows the tempo and which part of the song is playing.
+
+### How the music is read
+
+Everything is analysed straight from the samples in ~5 ms steps:
+
+- **Kick**: below ~150 Hz, level over one ~21 ms bass cycle so it doesn't swing with the wave's phase. A kick must rise sharply over the last ~40 ms and beat the fading peak of the previous kick, so a long or wobbling 808 note counts once. A snare that bumps the bass band at the same moment, with the bass well short of a real kick, counts as the snare.
+- **Snare/clap**: a sharp hit in 1–4.5 kHz at least as strong as the band above 6 kHz (rejecting hi-hats), loud next to the song's kicks (> −22 dB), and not followed by a kick within 30 ms (a kick's beater click reaches that band first).
+- **Hi-hat**: a sharp rise above 6 kHz that's stronger there than in the snare band.
+- **Tempo**: the beat period (70–180 BPM) that best explains the gaps between kicks over the last ~12 s; a gap k beats long counts 1/k, so kicks on 1 and 3 still give the beat.
+- **Song energy**: the last ~3 s of loudness and bass against the biggest part heard so far (forgetting 3 dB a minute). Until the song has gone clearly bigger than it started, or for its first minute, it reads at most 0.7, so a first verse isn't taken for the chorus. Two seconds of silence start a new song: range and tempo are learned afresh. A large, lasting change in energy marks a new section.
+
+**Timing.** Lights are held back to match the speaker: `speaker latency − time for audio to reach Halo − USB write time (measured)`, plus *Fine-tune*. Each kick and snare frame is scheduled from when the hit started in the audio, not when it was detected, so detection lag (a few ms for kicks, 30 ms for snares) doesn't make lights late. Speaker latency is macOS's figure or a microphone measurement (*Measure speaker delay*: 8 beeps found in the built-in mic's recording with a matched filter). Bluetooth speakers often play later than macOS reports: a Logi Z407 measured 352 ms against 123 ms reported. What the strip's controller adds can't be measured from the Mac, so *Sync test* plays a kick every 0.6 s and flashes the strip white through the same capture → detection → delay path; move Fine-tune until flash and kick land together.
+
+**Tests.** `./test.sh` runs the detector tests on synthetic audio: 808 notes, loud/soft and fast kicks, kick strength, snares and claps under quiet and loud hats, hats alone, snare bodies vs. kicks, hi-hat counts, stereo balance, kick/snare onset times (within 8/12 ms), tempo (four-on-the-floor, kicks on 1 and 3, missing kicks), 16-beat phrases, section changes, verse/chorus energy and new-song reset.
+
+**Diagnostics.** `open -g halo://record/15` writes 15 s of audio features and LED colors to `~/Library/Caches/Halo-build/frames.csv`; `defaults read local.halo.backlight debug.lightDelay` shows the delay breakdown.
 
 ## Shortcuts and automation
 
@@ -20,20 +62,21 @@ Halo handles `halo://` links, so Shortcuts (an **Open URLs** action), Siri (run 
 | Link | Effect |
 |---|---|
 | `halo://on`, `halo://off`, `halo://toggle` | Power |
-| `halo://mode/<screen\|music\|auto\|color\|effect\|pickup>` | Switch mode |
+| `halo://preset/<chill\|groove\|party\|club\|movie>` | Music preset (`movie` = Screen mode) |
+| `halo://mode/<screen\|music\|auto\|color\|effect>` | Switch mode |
 | `halo://color/ff8800` | Solid color (hex) |
 | `halo://ambient/ffc080` | Auto mode's ambient color |
 | `halo://brightness/40`, `/up`, `/down` | Brightness 1–100 |
-| `halo://music/<spectrum\|pulse\|party\|screen>` | Music mode with a style |
+| `halo://music/<spectrum\|party\|screen>` | Music mode with a style |
 | `halo://motion/<off\|flow\|beat\|wave>` | Spectrum color motion |
 | `halo://stereo/<on\|off>` | Follow stereo left/right |
 | `halo://intensity/40` | Party intensity 0–100 |
 | `halo://energy/<on\|off>` | Follow song energy |
-| `halo://snare/<on\|off>` | Snare/clap accents |
+| `halo://snare/<on\|off>`, `halo://hats/<on\|off>` | Snare/clap accents, hi-hat shimmer |
 | `halo://synctest`, `halo://synctest/off` | Sync test: kicks + white flashes for lining up Fine-tune |
 | `halo://palette/<rainbow\|fire\|ocean\|neon\|sunset\|forest\|ice\|custom>` | Music color palette |
 | `halo://sensitivity/65`, `halo://smoothness/35` | Tuning for the current music style |
-| `halo://effect/rainbow`, `halo://pickup/sparkle` | Built-in effect by name or index |
+| `halo://effect/rainbow` | Built-in effect by name or index |
 | `halo://speed/70` | Effect speed |
 | `halo://display/lg`, `halo://display/main` | Follow a display (name match) |
 | `halo://blackbars/off` | Black bar detection on/off |
@@ -66,7 +109,8 @@ The strip's controller is a Robobloq USB HID device, `1a86:fe07`, using the vend
 | `0x80` | Sync-screen frame: (start, R, G, B, end) ranges, 1-based, end inclusive |
 | `0x82` | Device info. Reply: `[8]` size in inches, `[11]` LED count, `[21..23]` firmware |
 | `0x85 02 n` | Built-in effect `n` (0–6) |
-| `0x85 03 07` | Microphone ("Pickup") effect Circles. Other codes tried (00–0D, 10–13) do nothing; the controller's ♫ button cycles its other sound effects. |
+| `0x85 03 07` | Microphone effect Circles (not used by Halo). Other codes tried (00–0D, 10–13) do nothing; the controller's ♫ button cycles its other sound effects. |
+| `0x98 e l` | (Vendor app, not used by Halo.) "Computer rhythm": drives sound effect `e` with level `l` (0–100), sent every 40 ms from Windows' audio peak meter. Needs firmware ≥ 1.8.2. |
 | `0x86` | Color ranges |
 | `0x87 b` | Brightness (1–255) |
 | `0x8A s` | Effect speed (0 = fast, 100 = slow) |

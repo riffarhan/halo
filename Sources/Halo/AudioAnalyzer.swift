@@ -18,6 +18,11 @@ final class AudioAnalyzer {
     /// 1 on a detected snare or clap, decaying towards 0 every `decay()` call.
     private(set) var snare = 0.0
     private(set) var snareCount = 0
+    /// 1 on a detected hi-hat, decaying fast towards 0 every `decay()` call.
+    private(set) var hat = 0.0
+    private(set) var hatCount = 0
+    private var hatRecent = [Double](repeating: 0, count: 6), hatRecentIndex = 0
+    private var hatPeak = 0.0, hatPrev = 0.0, sinceHat = 10.0
     /// Diagnostics for the last snare: level vs. its band's recent peak, vs. the hi-hat band, vs. the kick level.
     private(set) var lastSnareStats = (peak: 0.0, hat: 0.0, kick: 0.0)
     /// 0...1 how hard the latest kick hit compared with the loudest recent ones. Starts at the kick's onset
@@ -32,12 +37,33 @@ final class AudioAnalyzer {
     /// can read high until the first chorus shows how big the song gets.
     private(set) var energy = 0.5
     private var energyShort = 0.0, energyHi = 0.0, energyReady = false
+    /// Where the current song started (its first score) and how long it has played, for the first-verse cap.
+    private var songStartScore = 0.0, songTime = 0.0, silentTime = 0.0
+
+    /// Tempo from the last ~12 s of kicks, in beats per minute; 0 until it's clear.
+    private(set) var bpm = 0.0
+    /// Counts 16-beat phrases: steps on the kick that ends 16 beats of the tempo grid (16 kicks without a tempo),
+    /// and on the first kick after the song moves to a new section (energy changes a lot).
+    private(set) var phrase = 0
+    /// Seconds of audio analysed so far (a sample clock).
+    private var clock = 0.0
+    private var kickTimes: [Double] = []
+    private var phraseStart = 0.0, kicksSincePhrase = 0
+    private var sectionEnergy = 0.5, sectionTime = 0.0, sectionPending = false
 
     /// Higher = reacts to quieter sound. 0...100.
     var sensitivity = 50.0
 
     /// Called on the analysis queue the moment a beat is detected.
     var onBeat: (() -> Void)?
+    /// Called on the analysis queue when a snare or clap is confirmed (~30 ms after it, see `detectSnare`).
+    var onSnare: (() -> Void)?
+    /// Host time (seconds) the last kick / snare actually started in the audio, which is earlier than when it was
+    /// detected. Lets lights be timed to the sound itself rather than to the detection.
+    private(set) var lastBeatTime = 0.0
+    private(set) var lastSnareTime = 0.0
+    /// Host time of the first sample of the buffer being analysed.
+    private var bufferStart = 0.0
     /// How late macOS hands over audio, in ms (smoothed): now − end of the buffer.
     private(set) var captureLatencyMs = 0.0
 
@@ -61,7 +87,7 @@ final class AudioAnalyzer {
     private var snareRecent = [Double](repeating: 0, count: 6), snareRecentIndex = 0
     private var snareSlow = 0.0, snarePeak = 0.0, snarePrev = 0.0, lastSnarePeak = 0.0, sinceSnare = 10.0
     /// A snare-band hit waiting ~30 ms to see whether a kick follows (then it was the kick's click).
-    private var pendingSnare: (age: Double, stats: (peak: Double, hat: Double, kick: Double))?
+    private var pendingSnare: (age: Double, time: Double, stats: (peak: Double, hat: Double, kick: Double))?
     private var bassSlow = 0.0, bassPeak = 0.0, bassPrev = 0.0
     /// Loudest recent kick level, halving over ~20 s: what kick strength is measured against.
     private var kickRef = 0.0
@@ -90,6 +116,7 @@ final class AudioAnalyzer {
         bands = [Double](repeating: 0, count: Self.bandCount)
         loudness = 0; beat = 0; beatStrength = 0; bass = 0; balance = 0; kickRef = 0
         energy = 0.5; energyReady = false
+        newSong(); silentTime = 0; kicksSincePhrase = 0; phraseStart = clock
         snare = 0; pendingSnare = nil; snareSlow = 0; snarePeak = 0; snarePrev = 0; lastSnarePeak = 0; sinceSnare = 10
         snareSums = [Float](repeating: 0, count: 2); hatSums = [Float](repeating: 0, count: 2); snareRecent = [Double](repeating: 0, count: 6); lastBeatPeak = 0
         blockSums = [Float](repeating: 0, count: 4); blockCounts = [Int](repeating: 0, count: 4)
@@ -100,6 +127,7 @@ final class AudioAnalyzer {
     func decay() {
         beat *= 0.86
         snare *= 0.72
+        hat *= 0.6
     }
 
     func process(_ sb: CMSampleBuffer) {
@@ -139,6 +167,8 @@ final class AudioAnalyzer {
             }
         }
         let delivered = CMClockGetTime(CMClockGetHostTimeClock()).seconds
+        let pts = sb.presentationTimeStamp.seconds
+        bufferStart = pts.isFinite ? pts : delivered - Double(frames) / asbd.mSampleRate
         let end = (sb.presentationTimeStamp + sb.duration).seconds
         if end.isFinite, delivered - end > -1, delivered - end < 2 {
             let ms = (delivered - end) * 1000
@@ -164,7 +194,15 @@ final class AudioAnalyzer {
         loudPeak = max(loudDb, loudPeak - 0.04, -60)
         let loudTarget = silent ? 0 : clamp((loudDb - (loudPeak - range)) / range)
         loudness = smooth(loudness, loudTarget)
-        if !silent { updateEnergy(loudDb: loudDb, seconds: Double(samples.count) / sampleRate) }
+        let seconds = Double(samples.count) / sampleRate
+        if silent {
+            // Two seconds of silence: the next sound is a new song, so learn its range and tempo afresh.
+            silentTime += seconds
+            if silentTime > 2, energyReady { newSong() }
+        } else {
+            silentTime = 0
+            updateEnergy(loudDb: loudDb, seconds: seconds)
+        }
 
         // Spectrum
         var windowed = [Float](repeating: 0, count: n)
@@ -245,6 +283,7 @@ final class AudioAnalyzer {
             let e = Double(sqrt(blockSums.reduce(0, +) / Float(max(1, blockCounts.reduce(0, +)))))
             bassPeak = max(e, bassPeak * 0.9995)
             sinceBeat += Double(end - start) / sampleRate
+            clock += Double(end - start) / sampleRate
             let rel = e > 0.002 && bassPeak > 0 ? min(e / bassPeak, 1) : 0
             bass = rel > bass ? bass + (rel - bass) * 0.5 : bass * 0.94 + rel * 0.06
             kickRef = max(e, kickRef * 0.99983)
@@ -265,12 +304,15 @@ final class AudioAnalyzer {
                 lastBeatPeak = e
                 beatCount &+= 1
                 sinceBeat = 0
+                lastBeatTime = bufferStart + Double(start) / sampleRate
+                kickForTempo(at: clock)
                 onBeat?()
             }
             bassPrev = e
             bassSlow = bassSlow == 0 ? e : bassSlow * 0.985 + e * 0.015
             // After the kick check, so a kick's own click (same moment) is never also taken for a snare.
-            detectSnare(band, seconds: Double(end - start) / sampleRate)
+            detectSnare(band, seconds: Double(end - start) / sampleRate, time: bufferStart + Double(start) / sampleRate)
+            detectHat(band, seconds: Double(end - start) / sampleRate)
             start = end
         }
     }
@@ -283,17 +325,27 @@ final class AudioAnalyzer {
         let score = 0.6 * loudDb + 0.4 * bassDb
         if !energyReady {
             // Until the song shows its range, assume its biggest part is ~5 dB above where it starts.
-            energyShort = score; energyHi = score + 5; energyReady = true
+            energyShort = score; energyHi = score + 5; songStartScore = score; songTime = 0; energyReady = true
         }
+        songTime += seconds
         energyShort += (score - energyShort) * (1 - exp(-seconds / 3))
         // The biggest part heard so far: rises at once, forgets by 3 dB a minute (next song, quieter track).
         energyHi = max(energyShort, energyHi - seconds * 0.05)
         // At that level → 1; 9 dB or more below it → 0.
-        energy = clamp(1 - (energyHi - energyShort) / 9)
+        var e = clamp(1 - (energyHi - energyShort) / 9)
+        // Early in a song, before it has gone clearly bigger than it started (a chorus, a drop), a first verse
+        // that's merely louder than the intro shouldn't read as the song's peak.
+        if songTime < 60, energyHi < songStartScore + 8 { e = min(e, 0.7) }
+        energy = e
+        // A new section: energy has moved a long way from where the current section started and stayed there.
+        sectionTime += seconds
+        if abs(energy - sectionEnergy) > 0.35, sectionTime > 8 {
+            sectionPending = true
+            sectionEnergy = energy
+            sectionTime = 0
+        }
     }
 
-    /// A snare or clap: a sharp, loud hit in the 1–4.5 kHz band that's at least as strong there as above 6 kHz
-    /// (hi-hats are mostly above). A kick's click right on the kick is ignored, so a kick never also counts.
     /// Updates the snare-band level for this block: (level, hi-hat band level, lowest level of the last ~30 ms).
     private func snareBand(_ sum: Float, _ hatSum: Float, count: Int) -> (e: Double, hat: Double, floor: Double) {
         snareSums[snareIndex] = sum
@@ -317,7 +369,9 @@ final class AudioAnalyzer {
             && band.e > kickRef * 0.08
     }
 
-    private func detectSnare(_ band: (e: Double, hat: Double, floor: Double), seconds: Double) {
+    /// A snare or clap: a sharp, loud hit in the 1–4.5 kHz band that's at least as strong there as above 6 kHz
+    /// (hi-hats are mostly above). A kick's click right on the kick is ignored, so a kick never also counts.
+    private func detectSnare(_ band: (e: Double, hat: Double, floor: Double), seconds: Double, time: Double) {
         let e = band.e
         sinceSnare += seconds
         if sinceSnare < 0.06 { lastSnarePeak = max(lastSnarePeak, e) }
@@ -333,19 +387,99 @@ final class AudioAnalyzer {
                 snare = 1
                 snareCount &+= 1
                 lastSnareStats = p.stats
+                lastSnareTime = p.time
                 pendingSnare = nil
+                onSnare?()
             } else {
                 pendingSnare = p
             }
         }
         if pendingSnare == nil, snareOnset(band), e > snareSlow * threshold, e > snarePrev, e > mask,
            sinceSnare > 0.1, sinceBeat > 0.035 {
-            pendingSnare = (0, (e / max(snarePeak, 1e-9), e / max(band.hat, 1e-9), e / max(kickRef, 1e-9)))
+            pendingSnare = (0, time, (e / max(snarePeak, 1e-9), e / max(band.hat, 1e-9), e / max(kickRef, 1e-9)))
             sinceSnare = 0
             lastSnarePeak = e
         }
         snarePrev = e
         snareSlow = snareSlow == 0 ? e : snareSlow * 0.985 + e * 0.015
+    }
+
+    /// A hi-hat: a sharp rise above 6 kHz that's stronger there than in the snare band.
+    private func detectHat(_ band: (e: Double, hat: Double, floor: Double), seconds: Double) {
+        let h = band.hat
+        sinceHat += seconds
+        hatPeak = max(h, hatPeak * 0.9995)
+        let floor = hatRecent.min() ?? 0
+        hatRecent[hatRecentIndex] = h
+        hatRecentIndex = (hatRecentIndex + 1) % hatRecent.count
+        if h > 0.001, h > floor * 1.8, h > hatPeak * 0.25, h > hatPrev, h > band.e, sinceHat > 0.06 {
+            hat = 1
+            hatCount &+= 1
+            sinceHat = 0
+        }
+        hatPrev = h
+    }
+
+    private func newSong() {
+        energyReady = false
+        energy = 0.5
+        bpm = 0
+        kickTimes.removeAll()
+        sectionEnergy = 0.5
+        sectionTime = 0
+        sectionPending = false
+    }
+
+    /// Records a kick for tempo tracking and steps `phrase` when a phrase or section ends.
+    private func kickForTempo(at t: Double) {
+        kickTimes.append(t)
+        kickTimes.removeAll { t - $0 > 12 }
+        bpm = Self.estimateTempo(kickTimes, previous: bpm)
+        kicksSincePhrase += 1
+        var next = false
+        if sectionPending {
+            next = true
+            sectionPending = false
+        } else if bpm > 0 {
+            next = Int(((t - phraseStart) * bpm / 60).rounded()) >= 16
+        } else {
+            next = kicksSincePhrase >= 16
+        }
+        if next {
+            phrase &+= 1
+            phraseStart = t
+            kicksSincePhrase = 0
+        }
+    }
+
+    /// The beat period (70–180 BPM) that best explains the gaps between kicks, counting every pair of kicks up to
+    /// 4 s apart: a gap that's k periods long supports that period with weight 1/k, so a kick on beats 1 and 3
+    /// still points at the beat, not the half-time. Returns 0 when there are too few kicks or no clear winner.
+    static func estimateTempo(_ times: [Double], previous: Double) -> Double {
+        guard times.count >= 6 else { return 0 }
+        var best = 0.0, bestScore = 0.0, total = 0.0
+        var p = 60.0 / 180
+        while p <= 60.0 / 70 {
+            var score = 0.0
+            for i in 0 ..< times.count {
+                for j in (i + 1) ..< times.count {
+                    let gap = times[j] - times[i]
+                    if gap > 4 { break }
+                    let k = (gap / p).rounded()
+                    guard k >= 1, k <= 8 else { continue }
+                    let off = (gap - k * p) / 0.015
+                    score += exp(-off * off) / k
+                }
+            }
+            total += score
+            if score > bestScore { bestScore = score; best = p }
+            p += 0.002
+        }
+        guard best > 0, bestScore > 2 else { return 0 }
+        let bpm = 60 / best
+        // Hold a known tempo steady against small wobbles.
+        if previous > 0, abs(bpm - previous) / previous < 0.03 { return previous * 0.8 + bpm * 0.2 }
+        return bpm
     }
 
     /// Left/right balance in dB, mapped so ±12 dB is ±1. Silence and mono drift back to centered.

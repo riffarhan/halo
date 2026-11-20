@@ -57,12 +57,11 @@ struct PictureSettings: Codable, Equatable {
 }
 
 enum MusicStyle: String, Codable, CaseIterable, Identifiable {
-    case spectrum, pulse, party, screen
+    case spectrum, party, screen
     var id: String { rawValue }
     var title: String {
         switch self {
         case .spectrum: "Spectrum"
-        case .pulse: "Pulse"
         case .party: "Party"
         case .screen: "Screen"
         }
@@ -135,6 +134,8 @@ struct EngineConfig: Equatable {
     var songEnergy = true
     /// Music: a short whitish flash across the top middle on each snare or clap (no color change).
     var snareAccents = true
+    /// Music: hi-hats add a faint shimmer on the treble side.
+    var hatShimmer = false
     /// Sync test: include Halo's own audio and flash the strip white on every detected kick.
     var syncTest = false
     /// Hold music frames back by this much so they line up with speakers that play late (Bluetooth).
@@ -170,9 +171,9 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     private var lastUnstick = Date.distantPast
     private var timer: DispatchSourceTimer?
     private let audio = AudioAnalyzer()
-    private var hue = 0.0
     private var musicFade: [Double] = []
     private var musicLit: [Bool] = []
+    private var frameSeq = 0, lastSentSeq = 0
     // Party style state (q only)
     // Spectrum color motion state (q only)
     private var spectrumOffset = 0.0
@@ -187,10 +188,13 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     private var recordStart = Date()
     private var ledXCache: [Double] = []
     private var topWKey: LedLayout?
+    private var hatSeen = 0
+    private var hatLEDs: [Int] = []
     private var topWCache: [Double] = []
     private var spectrumHistory: [Double] = []
     private var partySeenBeat = 0
     private var partyBeats = 0
+    private var partySeenPhrase = 0
     private var partyPattern = 0
     private var partyColor = 0
     private var partyPrevColor = 0
@@ -200,13 +204,16 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
 
     /// Called on the main thread about once a second with how late audio arrives from macOS (ms).
     var onAudioLatency: ((Double) -> Void)?
+    /// Called on the main thread about once a second with the music's tempo (BPM, 0 = unknown) and energy (0…1).
+    var onMusicStats: ((Double, Double) -> Void)?
     private var lastStats = Date.distantPast
 
     init(device: RobobloqDevice) {
         self.device = device
         super.init()
         // Render the moment a beat is found instead of waiting for the next frame tick.
-        audio.onBeat = { [weak self] in self?.tick() }
+        audio.onBeat = { [weak self] in self.map { $0.tick(audioTime: $0.audio.lastBeatTime) } }
+        audio.onSnare = { [weak self] in self.map { $0.tick(audioTime: $0.audio.lastSnareTime) } }
     }
 
     var isRunning: Bool { stream != nil }
@@ -419,7 +426,10 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
 
     // MARK: Output
 
-    private func tick() {
+    /// Renders and sends one frame. `audioTime` (host seconds) is when the kick or snare that triggered this
+    /// frame started in the audio: with a light delay its frame goes out exactly `delay` after the sound itself
+    /// reached Halo's capture, so detection lag (a few ms for kicks, 30 ms for snares) doesn't make lights late.
+    private func tick(audioTime: Double? = nil) {
         let colors: [RGB]
         switch config.render {
         case .screen:
@@ -435,6 +445,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             } else {
                 var raw = musicColors(style)
                 if config.snareAccents, style != .screen { raw = applySnare(raw, style: style) }
+                if config.hatShimmer, style != .screen { raw = applyHats(raw) }
                 if config.stereo { raw = applyStereo(raw) }
                 colors = fadeMusic(raw, punch: style == .party ? partyIntensity : 0)
             }
@@ -442,13 +453,29 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             let now = Date()
             if now.timeIntervalSince(lastStats) > 1 {
                 lastStats = now
-                let ms = audio.captureLatencyMs
-                DispatchQueue.main.async { [weak self] in self?.onAudioLatency?(ms) }
+                let ms = audio.captureLatencyMs, bpm = audio.bpm, energy = audio.energy
+                DispatchQueue.main.async { [weak self] in
+                    self?.onAudioLatency?(ms)
+                    self?.onMusicStats?(bpm, energy)
+                }
             }
-            let delay = config.lightDelayMs
+            let delay = config.lightDelayMs / 1000
             if delay > 0 {
                 let out = colors.map(config.picture.whiteBalance.apply)
-                q.asyncAfter(deadline: .now() + delay / 1000) { [weak self] in self?.send(out) }
+                let now = CMClockGetTime(CMClockGetHostTimeClock()).seconds
+                // Normal frames show the latest audio: it reached Halo about now. Event frames: when the hit did.
+                let heard = audioTime.map { $0 + audio.captureLatencyMs / 1000 } ?? now
+                let at = max(now, heard + delay)
+                frameSeq &+= 1
+                let seq = frameSeq
+                q.asyncAfter(deadline: .now() + (at - now)) { [weak self] in
+                    guard let self else { return }
+                    // An event frame can be scheduled ahead of frames rendered just before it; those are stale
+                    // by the time they'd go out, so drop them rather than briefly undo the hit.
+                    guard seq > self.lastSentSeq else { return }
+                    self.lastSentSeq = seq
+                    self.send(out)
+                }
                 return
             }
         }
@@ -494,17 +521,6 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
                 let y = ((p + offset) / 2).truncatingRemainder(dividingBy: 1)
                 let c = MusicPalette.sample(stops, 1 - abs(1 - 2 * y))
                 return scaled(c, level)
-            }
-        case .pulse:
-            // Whole strip breathes with the music; the color moves along the palette on every beat.
-            hue = (hue + 0.0008).truncatingRemainder(dividingBy: 1)
-            let t = hue + Double(audio.beatCount % 8) / 8
-            let v = 0.06 + 0.94 * max(min(1, audio.beat * energyScale), audio.loudness * 0.75)
-            let stops = config.palette
-            return (0 ..< n).map { i in
-                // Triangle wave so the color sweeps back and forth instead of jumping from the last stop to the first.
-                let x = (t + Double(i) / Double(n) * 0.15).truncatingRemainder(dividingBy: 1)
-                return scaled(MusicPalette.sample(stops, 1 - abs(1 - 2 * x)), v)
             }
         case .party:
             return partyColors(n)
@@ -570,7 +586,11 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             partyPrevColor = partyColor
             partyColor += 1
             partyBeatTime = now
-            if partyBeats % 16 == 0 { partyPattern = (partyPattern + 1) % 4 }
+            // New pattern at the start of each 16-beat phrase of the tempo grid, and when the song changes section.
+            if audio.phrase != partySeenPhrase {
+                partySeenPhrase = audio.phrase
+                partyPattern = (partyPattern + 1) % 4
+            }
             // Strobe on the downbeat of each bar when the track is loud.
             if config.strobe, intensity > 0.6, partyBeats % 4 == 0, audio.loudness > 0.7 { strobeFrames = 2 }
         }
@@ -684,6 +704,27 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             func up(_ v: UInt8) -> UInt8 { UInt8(min(255, Double(v) + (255 - Double(v)) * a)) }
             return RGB(r: up(c.r), g: up(c.g), b: up(c.b))
         }
+    }
+
+    /// Hi-hats: on each hit, three random LEDs in the treble end (the last third of the strip) sparkle toward
+    /// white and fade within ~0.1 s. Faint on purpose: hats are dense, and bright ones would read as flicker.
+    private func applyHats(_ colors: [RGB]) -> [RGB] {
+        let n = colors.count
+        guard n > 3 else { return colors }
+        if audio.hatCount != hatSeen {
+            hatSeen = audio.hatCount
+            let from = n * 2 / 3
+            hatLEDs = (0 ..< 3).map { _ in Int.random(in: from ..< n) }
+        }
+        let a = min(1, audio.hat * 0.35 * energyScale)
+        guard a > 0.01 else { return colors }
+        var out = colors
+        for i in hatLEDs where i < n {
+            let c = out[i]
+            func up(_ v: UInt8) -> UInt8 { UInt8(min(255, Double(v) + (255 - Double(v)) * a)) }
+            out[i] = RGB(r: up(c.r), g: up(c.g), b: up(c.b))
+        }
+        return out
     }
 
     /// Horizontal position of each LED as seen from the front: 0 = left edge, 1 = right edge.

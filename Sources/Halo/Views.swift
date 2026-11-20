@@ -44,7 +44,6 @@ struct MenuView: View {
                 case .auto: AutoSection()
                 case .color: ColorSection()
                 case .effect: EffectSection()
-                case .pickup: PickupSection()
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -82,16 +81,53 @@ private struct ScreenSection: View {
 
 private struct MusicSection: View {
     @EnvironmentObject private var lights: LightController
+    @AppStorage("ui.musicAdvanced") private var showAdvanced = false
+    @AppStorage("ui.speakerSync") private var showSpeakerSync = false
+
+    private var preset: Binding<Preset?> {
+        Binding(get: { Preset.current(lights.settings) },
+                set: { if let p = $0 { p.apply(to: &lights.settings) } })
+    }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Preset", selection: preset) {
+                ForEach(Preset.allCases) { Text($0.title).tag(Optional($0)) }
+                if Preset.current(lights.settings) == nil { Text("Custom").tag(Preset?.none) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            Text(Preset.current(lights.settings)?.summary
+                 ?? "Your own mix of settings (see Advanced). Pick a preset to go back to one.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text(musicStatus).font(.caption2).foregroundStyle(.secondary)
+            if lights.settings.musicStyle != .screen { PalettePicker() }
+            if lights.settings.musicStyle == .party {
+                Toggle("Strobe on big hits", isOn: $lights.settings.partyStrobe)
+                    .disabled(lights.settings.partyIntensity <= 60)
+                Text("Short white flashes at full intensity. Leave off if anyone nearby is sensitive to flashing light.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            DisclosureGroup("Advanced", isExpanded: $showAdvanced) { advanced.padding(.top, 4) }
+            DisclosureGroup("Speaker sync", isExpanded: $showSpeakerSync) { speakerSync.padding(.top, 4) }
+            if lights.settings.musicStyle == .screen { DisplayPicker() }
+            CaptureErrorView()
+        }
+    }
+
+    private var musicStatus: String {
+        let tempo = lights.musicBPM > 0 ? String(format: "%.0f BPM", lights.musicBPM) : "Finding the beat…"
+        let part = lights.musicEnergy < 0.35 ? "calm part" : lights.musicEnergy < 0.75 ? "building" : "biggest part"
+        return "\(tempo) · \(part) of the song"
+    }
+
+    @ViewBuilder private var advanced: some View {
         VStack(alignment: .leading, spacing: 8) {
             Picker("Style", selection: $lights.settings.musicStyle) {
                 ForEach(MusicStyle.allCases) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
-            .labelsHidden()
-            Text(caption).font(.caption).foregroundStyle(.secondary)
-            if lights.settings.musicStyle != .screen { PalettePicker() }
+            Text(caption).font(.caption2).foregroundStyle(.secondary)
             if lights.settings.musicStyle == .spectrum {
                 Picker("Color motion", selection: $lights.settings.spectrumMotion) {
                     ForEach(SpectrumMotion.allCases) { Text($0.title).tag($0) }
@@ -99,33 +135,30 @@ private struct MusicSection: View {
                 .pickerStyle(.segmented)
                 Text(motionCaption).font(.caption2).foregroundStyle(.secondary)
             }
-            Toggle("Snare/clap accents", isOn: $lights.settings.snareAccents)
-            Text("Kicks drive the colors; each snare or clap adds a short white flash across the top middle.")
-                .font(.caption2).foregroundStyle(.secondary)
-            Toggle("Follow song energy", isOn: $lights.settings.songEnergy)
-            Text("Calmer in verses and breakdowns, bigger in choruses and drops.")
-                .font(.caption2).foregroundStyle(.secondary)
-            Toggle("Follow stereo (left/right)", isOn: $lights.settings.stereo)
-            Text("When the music leans left or right, the other side of the strip dims.")
-                .font(.caption2).foregroundStyle(.secondary)
             if lights.settings.musicStyle == .party {
                 LabeledSlider(title: "Intensity", value: $lights.settings.partyIntensity, range: 0 ... 100, format: "%.0f")
                 Text("Low: colors fade into each other on the beat and the strip never goes dark. High: hard club hits.")
                     .font(.caption2).foregroundStyle(.secondary)
-                Toggle("Strobe on big hits", isOn: $lights.settings.partyStrobe)
-                    .disabled(lights.settings.partyIntensity <= 60)
-                Text("Short white flashes. Leave off if anyone nearby is sensitive to flashing light.")
-                    .font(.caption2).foregroundStyle(.secondary)
             }
+            Toggle("Snare/clap accents", isOn: $lights.settings.snareAccents)
+            Text("Kicks drive the colors; each snare or clap adds a short white flash across the top middle.")
+                .font(.caption2).foregroundStyle(.secondary)
+            Toggle("Hi-hat shimmer", isOn: $lights.settings.hatShimmer)
+            Text("Hi-hats add a faint sparkle on the treble side of the strip.")
+                .font(.caption2).foregroundStyle(.secondary)
+            Toggle("Follow song energy", isOn: $lights.settings.songEnergy)
+            Text("Calmer in verses and breakdowns, bigger in choruses and drops (Spectrum).")
+                .font(.caption2).foregroundStyle(.secondary)
+            Toggle("Follow stereo (left/right)", isOn: $lights.settings.stereo)
+            Text("When the music leans left or right, the other side of the strip dims.")
+                .font(.caption2).foregroundStyle(.secondary)
             LabeledSlider(title: "Sensitivity", value: $lights.settings.tuning.sensitivity, range: 0 ... 100, format: "%.0f")
             LabeledSlider(title: "Smoothness", value: $lights.settings.tuning.smoothness, range: 0 ... 100, format: "%.0f")
-            if let rec = MusicTuning.recommended[lights.settings.musicStyle.rawValue], rec != lights.settings.tuning {
-                Button("Use recommended (\(Int(rec.sensitivity)) / \(Int(rec.smoothness)))") {
-                    lights.settings.tuning = rec
-                }
-                .buttonStyle(.borderless)
-                .font(.caption)
-            }
+        }
+    }
+
+    @ViewBuilder private var speakerSync: some View {
+        VStack(alignment: .leading, spacing: 8) {
             Toggle("Match speaker delay automatically", isOn: $lights.settings.autoSpeakerSync)
             LabeledSlider(title: lights.settings.autoSpeakerSync ? "Fine-tune" : "Light delay",
                           value: $lights.settings.lightDelayMs,
@@ -145,8 +178,6 @@ private struct MusicSection: View {
                     Text(msg).font(.caption2).foregroundStyle(.secondary)
                 }
             }
-            if lights.settings.musicStyle == .screen { DisplayPicker() }
-            CaptureErrorView()
         }
     }
 
@@ -183,7 +214,6 @@ private struct MusicSection: View {
     private var caption: String {
         switch lights.settings.musicStyle {
         case .spectrum: "Bass on the left, treble on the right, colored along the palette below."
-        case .pulse: "The whole strip pulses with the music and changes color on the beat."
         case .party: "Club lights: hard hits on every kick, a new color each beat, and a new pattern every 16 beats."
         case .screen: "Screen colors, with brightness following the music."
         }
@@ -280,19 +310,6 @@ private struct EffectSection: View {
         VStack(alignment: .leading, spacing: 10) {
             NameGrid(names: Robobloq.effectNames, selection: $lights.settings.effect)
             LabeledSlider(title: "Speed", value: $lights.settings.speed, range: 0 ... 100, format: "%.0f")
-        }
-    }
-}
-
-private struct PickupSection: View {
-    @EnvironmentObject private var lights: LightController
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            NameGrid(names: Robobloq.pickupNames, selection: $lights.settings.pickupEffect)
-            LabeledSlider(title: "Sensitivity", value: $lights.settings.pickupSensitivity, range: 0 ... 100, format: "%.0f")
-            Text("Uses the microphone on the controller, so it reacts to any sound in the room. For its other sound effects, press ♫ on the controller.")
-                .font(.caption).foregroundStyle(.secondary)
         }
     }
 }
@@ -406,10 +423,10 @@ struct SettingsView: View {
 
             Section {
                 ShortcutRow(url: "halo://toggle", note: "On / off")
-                ShortcutRow(url: "halo://mode/auto", note: "screen · music · auto · color · effect · pickup")
+                ShortcutRow(url: "halo://mode/auto", note: "screen · music · auto · color · effect")
                 ShortcutRow(url: "halo://color/ff8800", note: "Solid color (hex)")
                 ShortcutRow(url: "halo://brightness/40", note: "1–100, or up / down")
-                ShortcutRow(url: "halo://music/pulse", note: "spectrum · pulse · screen")
+                ShortcutRow(url: "halo://music/party", note: "spectrum · party · screen")
                 ShortcutRow(url: "halo://effect/rainbow", note: "Built-in effect by name")
                 ShortcutRow(url: "halo://display/lg", note: "Follow a display by name, or main")
                 ShortcutRow(url: "halo://videosync/on", note: "Bluetooth video sync on / off")

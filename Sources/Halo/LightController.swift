@@ -4,7 +4,7 @@ import ServiceManagement
 import SwiftUI
 
 enum LightMode: String, Codable, CaseIterable, Identifiable {
-    case screen, music, auto, color, effect, pickup
+    case screen, music, auto, color, effect
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -13,7 +13,6 @@ enum LightMode: String, Codable, CaseIterable, Identifiable {
         case .auto: "Auto"
         case .color: "Color"
         case .effect: "Effect"
-        case .pickup: "Pickup"
         }
     }
     var symbol: String {
@@ -23,7 +22,6 @@ enum LightMode: String, Codable, CaseIterable, Identifiable {
         case .auto: "wand.and.stars"
         case .color: "paintpalette"
         case .effect: "sparkles"
-        case .pickup: "mic"
         }
     }
 }
@@ -37,8 +35,6 @@ struct Settings: Codable, Equatable {
     var brightness = 80.0
     var effect = 0
     var speed = 50.0
-    var pickupEffect = 0
-    var pickupSensitivity = 50.0
     var musicStyle: MusicStyle = .spectrum
     /// Sensitivity/smoothness per music style, keyed by MusicStyle.rawValue.
     var musicTuning: [String: MusicTuning] = MusicTuning.recommended
@@ -56,6 +52,8 @@ struct Settings: Codable, Equatable {
     var songEnergy = true
     /// Music: a short whitish flash across the top middle on each snare or clap.
     var snareAccents = true
+    /// Music: hi-hats add a faint shimmer on the treble side of the strip.
+    var hatShimmer = false
     /// Manual fine-tune added on top of the automatic speaker match (can be negative).
     var lightDelayMs = 0.0
     /// Hold Music lights back by the speaker's reported latency (Bluetooth plays sound late).
@@ -80,7 +78,6 @@ struct MusicTuning: Codable, Equatable {
     /// Spectrum and Pulse read best soft; Party needs hits that land and drop away fast.
     static let recommended: [String: MusicTuning] = [
         MusicStyle.spectrum.rawValue: MusicTuning(sensitivity: 50, smoothness: 70),
-        MusicStyle.pulse.rawValue: MusicTuning(sensitivity: 55, smoothness: 60),
         MusicStyle.party.rawValue: MusicTuning(sensitivity: 65, smoothness: 35),
         MusicStyle.screen.rawValue: MusicTuning(sensitivity: 50, smoothness: 60),
     ]
@@ -120,6 +117,9 @@ final class LightController: ObservableObject {
     @Published private(set) var displays: [DisplayChoice] = []
     /// Auto mode: something is fullscreen on the chosen display right now.
     @Published private(set) var fullscreenDetected = false
+    /// Auto mode: another app is playing sound, so Auto shows Music instead of the ambient color.
+    @Published private(set) var autoMusic = false
+    private var audioOnChecks = 0, audioOffChecks = 0
     /// How late macOS delivers audio to Halo, in ms (Music mode only).
     @Published private(set) var audioLatencyMs: Double?
     /// Name and connection type of the current sound output, e.g. "Logi Z407 (Bluetooth)".
@@ -147,6 +147,13 @@ final class LightController: ObservableObject {
         }
         device.onDeviceInfo = { [weak self] info in
             MainActor.assumeIsolated { self?.received(info) }
+        }
+        engine.onMusicStats = { [weak self] bpm, energy in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if abs(self.musicBPM - bpm) > 0.5 { self.musicBPM = bpm }
+                if abs(self.musicEnergy - energy) > 0.03 { self.musicEnergy = energy }
+            }
         }
         engine.onAudioLatency = { [weak self] ms in
             MainActor.assumeIsolated {
@@ -198,6 +205,9 @@ final class LightController: ObservableObject {
             }
         }
         merge(&merged, saved)
+        // Pickup mode and the Pulse style were removed: carry old settings over instead of failing to load.
+        if merged["mode"] as? String == "pickup" { merged["mode"] = LightMode.music.rawValue }
+        if merged["musicStyle"] as? String == "pulse" { merged["musicStyle"] = MusicStyle.spectrum.rawValue }
         guard let mergedData = try? JSONSerialization.data(withJSONObject: merged),
               let settings = try? JSONDecoder().decode(Settings.self, from: mergedData)
         else { return Settings() }
@@ -244,7 +254,8 @@ final class LightController: ObservableObject {
 
     private var engineConfig: EngineConfig {
         EngineConfig(
-            render: settings.mode == .music || syncTesting ? .music(settings.musicStyle) : .screen,
+            render: settings.mode == .music || syncTesting || (settings.mode == .auto && autoMusic && !fullscreenDetected)
+                ? .music(settings.musicStyle) : .screen,
             layout: settings.layout,
             picture: settings.picture,
             musicSensitivity: settings.tuning.sensitivity,
@@ -256,6 +267,7 @@ final class LightController: ObservableObject {
             stereo: settings.stereo,
             songEnergy: settings.songEnergy,
             snareAccents: settings.snareAccents,
+            hatShimmer: settings.hatShimmer,
             syncTest: syncTesting,
             lightDelayMs: effectiveLightDelayMs
         )
@@ -305,9 +317,8 @@ final class LightController: ObservableObject {
         let captureMode = [.screen, .music, .auto].contains(s.mode)
         let needsApply = s.isOn != o.isOn || s.mode != o.mode
             || (s.mode == .color && (s.color != o.color || s.picture.whiteBalance != o.picture.whiteBalance))
-            || (s.mode == .auto && !fullscreenDetected && (s.ambientColor != o.ambientColor || s.picture.whiteBalance != o.picture.whiteBalance))
+            || (s.mode == .auto && !fullscreenDetected && !autoMusic && (s.ambientColor != o.ambientColor || s.picture.whiteBalance != o.picture.whiteBalance))
             || (s.mode == .effect && s.effect != o.effect)
-            || (s.mode == .pickup && s.pickupEffect != o.pickupEffect)
             || (s.mode == .music && s.musicStyle != o.musicStyle)
             || (captureMode && (s.displayID != o.displayID || s.picture.fps != o.picture.fps))
         if needsApply { apply(); return }
@@ -320,13 +331,10 @@ final class LightController: ObservableObject {
         if s.mode == .effect, s.speed != o.speed {
             device.send(Robobloq.speedBody(s.speed))
         }
-        if s.mode == .pickup, s.pickupSensitivity != o.pickupSensitivity {
-            device.send(Robobloq.speedBody(s.pickupSensitivity))
-        }
         if engine.isRunning, s.layout != o.layout || s.picture != o.picture || s.musicTuning != o.musicTuning
             || s.musicPalette != o.musicPalette
             || s.paletteFrom != o.paletteFrom || s.paletteTo != o.paletteTo || s.partyStrobe != o.partyStrobe || s.partyIntensity != o.partyIntensity
-            || s.spectrumMotion != o.spectrumMotion || s.stereo != o.stereo || s.songEnergy != o.songEnergy || s.snareAccents != o.snareAccents
+            || s.spectrumMotion != o.spectrumMotion || s.stereo != o.stereo || s.songEnergy != o.songEnergy || s.snareAccents != o.snareAccents || s.hatShimmer != o.hatShimmer
             || s.lightDelayMs != o.lightDelayMs || s.autoSpeakerSync != o.autoSpeakerSync {
             refreshLightDelay()
             engine.update(engineConfig)
@@ -339,7 +347,7 @@ final class LightController: ObservableObject {
         outputDevice = Self.currentOutputDevice()
         effectiveLightDelayMs = computeLightDelay()
         let config = engineConfig
-        let ambientOnly = s.mode == .auto && !fullscreenDetected
+        let ambientOnly = s.mode == .auto && !fullscreenDetected && !autoMusic
         applyTask?.cancel()
         applyTask = Task {
             // The controller can stall (e.g. after a half-written frame) and ignore frames until it gets this.
@@ -359,10 +367,6 @@ final class LightController: ObservableObject {
                 await engine.stop()
                 device.send(Robobloq.effectBody(s.effect))
                 device.send(Robobloq.speedBody(s.speed))
-            case .pickup:
-                await engine.stop()
-                device.send(Robobloq.pickupBody(s.pickupEffect))
-                device.send(Robobloq.speedBody(s.pickupSensitivity))
             case .auto where ambientOnly:
                 await engine.stop()
                 device.send(Robobloq.solidBody(wb(s.ambientColor), ledCount: ledCount))
@@ -392,19 +396,50 @@ final class LightController: ObservableObject {
 
     private func startAutoWatcher() {
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.checkFullscreen() }
+            MainActor.assumeIsolated { self?.checkAuto() }
         }
         RunLoop.main.add(t, forMode: .common)
         autoTimer = t
     }
 
-    private func checkFullscreen() {
+    /// Auto mode: a fullscreen window (video, game) → screen sync; otherwise another app playing sound → Music;
+    /// otherwise the ambient color. Sound has to play for 2 s to switch to Music and stop for 5 s to switch back,
+    /// so a notification sound or a pause between songs doesn't flip the lights.
+    private func checkAuto() {
         guard settings.mode == .auto, settings.isOn else { return }
-        let now = Self.hasFullscreenWindow(on: effectiveDisplayID)
-        guard now != fullscreenDetected else { return }
-        fullscreenDetected = now
-        NSLog("Halo: auto mode → %@", now ? "fullscreen, syncing" : "ambient")
+        let fullscreen = Self.hasFullscreenWindow(on: effectiveDisplayID)
+        if Self.otherAppPlayingAudio() { audioOnChecks += 1; audioOffChecks = 0 } else { audioOffChecks += 1; audioOnChecks = 0 }
+        var music = autoMusic
+        if !music, audioOnChecks >= 2 { music = true }
+        if music, audioOffChecks >= 5 { music = false }
+        guard fullscreen != fullscreenDetected || music != autoMusic else { return }
+        fullscreenDetected = fullscreen
+        autoMusic = music
+        NSLog("Halo: auto mode → %@", fullscreen ? "fullscreen, syncing" : music ? "music" : "ambient")
         apply()
+    }
+
+    /// Whether an app other than Halo is playing sound right now (Core Audio's per-process "running output").
+    static func otherAppPlayingAudio() -> Bool {
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList,
+                                              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(system, &addr, 0, nil, &size) == noErr, size > 0 else { return false }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(system, &addr, 0, nil, &size, &ids) == noErr else { return false }
+        let me = getpid()
+        for id in ids {
+            var running: UInt32 = 0, rs = UInt32(MemoryLayout<UInt32>.size)
+            var ra = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyIsRunningOutput,
+                                                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            guard AudioObjectGetPropertyData(id, &ra, 0, nil, &rs, &running) == noErr, running != 0 else { continue }
+            var pid: pid_t = 0, ps = UInt32(MemoryLayout<pid_t>.size)
+            var pa = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyPID,
+                                                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            if AudioObjectGetPropertyData(id, &pa, 0, nil, &ps, &pid) == noErr, pid != me { return true }
+        }
+        return false
     }
 
     /// True when another app has a normal-layer window covering the whole display
@@ -497,6 +532,9 @@ final class LightController: ObservableObject {
     @Published private(set) var calibrating = false
     /// Sync test running: Halo plays kicks and flashes the strip white through the normal music path.
     @Published private(set) var syncTesting = false
+    /// Tempo and song energy of the music playing, refreshed about once a second (0 / 0.5 when unknown).
+    @Published private(set) var musicBPM = 0.0
+    @Published private(set) var musicEnergy = 0.5
     /// Measured time to write one frame to the strip over USB, ms.
     var frameWriteMs: Double { device.frameWriteMs }
     private var syncTestPlayer: SyncTestPlayer?
@@ -736,9 +774,6 @@ final class LightController: ObservableObject {
         case "effect":
             guard let i = index(Robobloq.effectNames) else { return reject(url) }
             s.effect = i; s.mode = .effect; s.isOn = true
-        case "pickup":
-            guard let i = index(Robobloq.pickupNames) else { return reject(url) }
-            s.pickupEffect = i; s.mode = .pickup; s.isOn = true
         case "music":
             if !arg.isEmpty {
                 guard let style = MusicStyle.allCases.first(where: { $0.rawValue == arg }) else { return reject(url) }
@@ -772,6 +807,12 @@ final class LightController: ObservableObject {
         case "synctest":
             if ["off", "stop", "0"].contains(arg) { stopSyncTest() } else { startSyncTest() }
             return
+        case "preset":
+            if arg == "movie" { s.mode = .screen; s.isOn = true; break }
+            guard let p = Preset(rawValue: arg) else { return reject(url) }
+            p.apply(to: &s)
+        case "hats":
+            s.hatShimmer = !["off", "0", "false"].contains(arg)
         case "snare":
             s.snareAccents = !["off", "0", "false"].contains(arg)
         case "energy":

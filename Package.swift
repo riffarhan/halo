@@ -7,5 +7,6 @@ let package = Package(
     targets: [
         .target(name: "HaloAudio", path: "Sources/HaloAudio"),
         .executableTarget(name: "Halo", dependencies: ["HaloAudio"], path: "Sources/Halo"),
+        .testTarget(name: "HaloTests", dependencies: ["Halo"], path: "Tests/HaloTests"),
     ]
 )
