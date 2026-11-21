@@ -54,6 +54,9 @@ struct Settings: Codable, Equatable {
     var snareAccents = true
     /// Music: hi-hats add a faint shimmer on the treble side of the strip.
     var hatShimmer = false
+    /// Music: how much the whole strip's brightness follows the music (0 = not at all, 100 = fully): dimmer in
+    /// quiet passages and verses, brighter in choruses and on each kick.
+    var musicDynamics = 50.0
     /// Manual fine-tune added on top of the automatic speaker match (can be negative).
     var lightDelayMs = 0.0
     /// Hold Music lights back by the speaker's reported latency (Bluetooth plays sound late).
@@ -252,6 +255,20 @@ final class LightController: ObservableObject {
 
     private func wb(_ c: RGB) -> RGB { settings.picture.whiteBalance.apply(c) }
 
+    /// The strip's own brightness command (0x87) only affects its built-in effects; colors Halo sends (Color,
+    /// Screen, Music, ambient) ignore it. So Halo dims those itself. Squared, so the slider looks even to the
+    /// eye: 50 % is about a quarter of the light, which looks about half as bright.
+    /// A 1 % floor keeps the bottom of the slider a faint glow instead of off (or 8-bit colors falling apart).
+    nonisolated static func brightnessScale(_ percent: Double) -> Double {
+        0.01 + 0.99 * pow(min(max(percent, 1), 100) / 100, 2)
+    }
+
+    private func dimmed(_ c: RGB) -> RGB {
+        let k = Self.brightnessScale(settings.brightness)
+        func f(_ v: UInt8) -> UInt8 { UInt8((Double(v) * k).rounded()) }
+        return RGB(r: f(c.r), g: f(c.g), b: f(c.b))
+    }
+
     private var engineConfig: EngineConfig {
         EngineConfig(
             render: settings.mode == .music || syncTesting || (settings.mode == .auto && autoMusic && !fullscreenDetected)
@@ -268,6 +285,8 @@ final class LightController: ObservableObject {
             songEnergy: settings.songEnergy,
             snareAccents: settings.snareAccents,
             hatShimmer: settings.hatShimmer,
+            dynamics: settings.musicDynamics / 100,
+            brightness: Self.brightnessScale(settings.brightness),
             syncTest: syncTesting,
             lightDelayMs: effectiveLightDelayMs
         )
@@ -326,7 +345,12 @@ final class LightController: ObservableObject {
         // Small changes applied in place
         guard s.isOn else { return }
         if s.brightness != o.brightness {
-            device.send(Robobloq.brightnessBody(percent: s.brightness))
+            if s.mode == .effect {
+                device.send(Robobloq.brightnessBody(percent: s.brightness))
+            } else if [.color, .auto].contains(s.mode) && !engine.isRunning {
+                apply()
+                return
+            }
         }
         if s.mode == .effect, s.speed != o.speed {
             device.send(Robobloq.speedBody(s.speed))
@@ -335,6 +359,7 @@ final class LightController: ObservableObject {
             || s.musicPalette != o.musicPalette
             || s.paletteFrom != o.paletteFrom || s.paletteTo != o.paletteTo || s.partyStrobe != o.partyStrobe || s.partyIntensity != o.partyIntensity
             || s.spectrumMotion != o.spectrumMotion || s.stereo != o.stereo || s.songEnergy != o.songEnergy || s.snareAccents != o.snareAccents || s.hatShimmer != o.hatShimmer
+            || s.musicDynamics != o.musicDynamics || s.brightness != o.brightness
             || s.lightDelayMs != o.lightDelayMs || s.autoSpeakerSync != o.autoSpeakerSync {
             refreshLightDelay()
             engine.update(engineConfig)
@@ -358,18 +383,19 @@ final class LightController: ObservableObject {
                 device.send(Robobloq.solidBody(.black, ledCount: ledCount))
                 return
             }
-            device.send(Robobloq.brightnessBody(percent: s.brightness))
+            // Effects are drawn by the controller, so they use its brightness; everything else is dimmed by Halo.
+            device.send(Robobloq.brightnessBody(percent: s.mode == .effect ? s.brightness : 100))
             switch s.mode {
             case .color:
                 await engine.stop()
-                device.send(Robobloq.solidBody(wb(s.color), ledCount: ledCount))
+                device.send(Robobloq.solidBody(wb(dimmed(s.color)), ledCount: ledCount))
             case .effect:
                 await engine.stop()
                 device.send(Robobloq.effectBody(s.effect))
                 device.send(Robobloq.speedBody(s.speed))
             case .auto where ambientOnly:
                 await engine.stop()
-                device.send(Robobloq.solidBody(wb(s.ambientColor), ledCount: ledCount))
+                device.send(Robobloq.solidBody(wb(dimmed(s.ambientColor)), ledCount: ledCount))
             case .screen, .music, .auto:
                 await runEngine(config, displayID: effectiveDisplayID)
             }
@@ -714,8 +740,8 @@ final class LightController: ObservableObject {
     }
 
     private func sendWhitePreview() {
-        device.send(Robobloq.brightnessBody(percent: settings.brightness))
-        device.send(Robobloq.solidBody(wb(.white), ledCount: ledCount))
+        device.send(Robobloq.brightnessBody(percent: 100))
+        device.send(Robobloq.solidBody(wb(dimmed(.white)), ledCount: ledCount))
     }
 
     func endHolds() {
@@ -811,6 +837,9 @@ final class LightController: ObservableObject {
             if arg == "movie" { s.mode = .screen; s.isOn = true; break }
             guard let p = Preset(rawValue: arg) else { return reject(url) }
             p.apply(to: &s)
+        case "dynamics":
+            guard let v = number(0 ... 100) else { return reject(url) }
+            s.musicDynamics = v
         case "hats":
             s.hatShimmer = !["off", "0", "false"].contains(arg)
         case "snare":

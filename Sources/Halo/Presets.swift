@@ -26,18 +26,19 @@ enum Preset: String, CaseIterable, Identifiable {
         var hats: Bool
         var energy = true
         var stereo = true
+        var dynamics: Double
         var tuning: MusicTuning
     }
 
     private var look: Look {
         switch self {
-        case .chill: Look(style: .spectrum, motion: .flow, snare: false, hats: false,
+        case .chill: Look(style: .spectrum, motion: .flow, snare: false, hats: false, dynamics: 30,
                           tuning: MusicTuning(sensitivity: 40, smoothness: 85))
-        case .groove: Look(style: .spectrum, motion: .beat, snare: true, hats: true,
+        case .groove: Look(style: .spectrum, motion: .beat, snare: true, hats: true, dynamics: 50,
                            tuning: MusicTuning(sensitivity: 30, smoothness: 80))
-        case .party: Look(style: .party, intensity: 50, snare: true, hats: false,
+        case .party: Look(style: .party, intensity: 50, snare: true, hats: false, dynamics: 40,
                           tuning: MusicTuning(sensitivity: 45, smoothness: 65))
-        case .club: Look(style: .party, intensity: 100, snare: true, hats: false, stereo: false,
+        case .club: Look(style: .party, intensity: 100, snare: true, hats: false, stereo: false, dynamics: 0,
                          tuning: MusicTuning(sensitivity: 45, smoothness: 65))
         }
     }
@@ -53,6 +54,7 @@ enum Preset: String, CaseIterable, Identifiable {
         s.hatShimmer = l.hats
         s.songEnergy = l.energy
         s.stereo = l.stereo
+        s.musicDynamics = l.dynamics
         s.tuning = l.tuning
     }
 
@@ -63,7 +65,7 @@ enum Preset: String, CaseIterable, Identifiable {
             && (l.style != .spectrum || s.spectrumMotion == l.motion)
             && (l.style != .party || near(s.partyIntensity, l.intensity))
             && s.snareAccents == l.snare && s.hatShimmer == l.hats
-            && s.songEnergy == l.energy && s.stereo == l.stereo
+            && s.songEnergy == l.energy && s.stereo == l.stereo && near(s.musicDynamics, l.dynamics)
             && near(s.tuning.sensitivity, l.tuning.sensitivity) && near(s.tuning.smoothness, l.tuning.smoothness)
     }
 

@@ -136,6 +136,11 @@ struct EngineConfig: Equatable {
     var snareAccents = true
     /// Music: hi-hats add a faint shimmer on the treble side.
     var hatShimmer = false
+    /// Music: 0…1, how much the whole strip's brightness follows the music.
+    var dynamics = 0.0
+    /// Overall brightness, 0…1 (already on the eye's curve). Halo dims frames itself: the strip's brightness
+    /// command doesn't affect frames it's sent.
+    var brightness = 1.0
     /// Sync test: include Halo's own audio and flash the strip white on every detected kick.
     var syncTest = false
     /// Hold music frames back by this much so they line up with speakers that play late (Bluetooth).
@@ -174,6 +179,7 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     private var musicFade: [Double] = []
     private var musicLit: [Bool] = []
     private var frameSeq = 0, lastSentSeq = 0
+    private var dynamicsLevel = 1.0
     // Party style state (q only)
     // Spectrum color motion state (q only)
     private var spectrumOffset = 0.0
@@ -430,11 +436,11 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
     /// frame started in the audio: with a light delay its frame goes out exactly `delay` after the sound itself
     /// reached Halo's capture, so detection lag (a few ms for kicks, 30 ms for snares) doesn't make lights late.
     private func tick(audioTime: Double? = nil) {
-        let colors: [RGB]
+        var colors: [RGB]
         switch config.render {
         case .screen:
             guard let c = screenColors() else { return }
-            colors = c
+            colors = dim(c)
         case .music(let style):
             audio.decay()
             if config.syncTest {
@@ -447,8 +453,9 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
                 if config.snareAccents, style != .screen { raw = applySnare(raw, style: style) }
                 if config.hatShimmer, style != .screen { raw = applyHats(raw) }
                 if config.stereo { raw = applyStereo(raw) }
-                colors = fadeMusic(raw, punch: style == .party ? partyIntensity : 0)
+                colors = applyDynamics(fadeMusic(raw, punch: style == .party ? partyIntensity : 0))
             }
+            colors = dim(colors)
             if recordUntil != nil { recordFrame(colors) }
             let now = Date()
             if now.timeIntervalSince(lastStats) > 1 {
@@ -725,6 +732,26 @@ final class SyncEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked S
             out[i] = RGB(r: up(c.r), g: up(c.g), b: up(c.b))
         }
         return out
+    }
+
+    /// Whole-strip brightness following the music: the song's part (energy) and the moment's loudness set the
+    /// level, each kick pushes it up. Rises within a frame or two, falls over ~0.4 s, so it breathes rather
+    /// than flickers. `config.dynamics` blends from no effect (0) to the full range (0.3–1).
+    private func applyDynamics(_ colors: [RGB]) -> [RGB] {
+        guard config.dynamics > 0 else { return colors }
+        let music = 0.3 + 0.5 * (0.5 * audio.energy + 0.5 * audio.loudness) + 0.2 * audio.beat
+        let target = 1 - config.dynamics * (1 - min(1, music))
+        dynamicsLevel += (target - dynamicsLevel) * (target > dynamicsLevel ? 0.5 : 0.08)
+        return scale(colors, dynamicsLevel)
+    }
+
+    private func dim(_ colors: [RGB]) -> [RGB] { config.brightness >= 0.999 ? colors : scale(colors, config.brightness) }
+
+    private func scale(_ colors: [RGB], _ k: Double) -> [RGB] {
+        colors.map { c in
+            func f(_ v: UInt8) -> UInt8 { UInt8((Double(v) * k).rounded()) }
+            return RGB(r: f(c.r), g: f(c.g), b: f(c.b))
+        }
     }
 
     /// Horizontal position of each LED as seen from the front: 0 = left edge, 1 = right edge.

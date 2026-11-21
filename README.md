@@ -10,7 +10,7 @@ A small macOS menu-bar app for the AKKLED monitor backlight strip. It replaces t
 | **Color** | One solid color |
 | **Effect** | The controller's 7 built-in animations, with speed control |
 
-Also included: per-display selection, white balance with a live white preview, brightness, launch at login, lights off on sleep or quit, and a layout test pattern. Opening Halo again from Finder or Spotlight opens its settings window.
+Also included: per-display selection, white balance with a live white preview, brightness (Halo dims the colors it sends itself, on an eye-even curve with a 1 % floor, because the strip's own brightness command only affects its built-in effects), launch at login, lights off on sleep or quit, and a layout test pattern. Opening Halo again from Finder or Spotlight opens its settings window.
 
 ## Music
 
@@ -33,6 +33,7 @@ Pick a preset; everything else lives under *Advanced* and *Speaker sync*. A pres
 - **Screen**: screen colors, brightness follows the music.
 - **Snare/clap accents**: the top middle flashes toward white for ~0.1 s, without changing colors, so kick ("boom") and snare ("tak") read as different hits.
 - **Hi-hat shimmer**: three LEDs at the treble end sparkle faintly on each hat.
+- **Brightness follows music**: the whole strip dims in quiet passages and verses and brightens in choruses and on kicks (song energy, loudness and kicks set the level; rises in a frame or two, falls over ~0.4 s). Chill 30, Groove 50, Party 40, Club 0.
 - **Follow song energy** (Spectrum): beat effects ×0.55 in verses and breakdowns, ×1.45 in choruses and drops.
 - **Follow stereo**: the side away from the louder channel dims (up to 85 % at 12 dB).
 - Palettes: Rainbow, Fire, Ocean, Neon, Sunset, Forest, Ice, or a custom two-color gradient. Each style keeps its own sensitivity and smoothness. Smoothness only softens small wobbles and fades; a rise as big as a kick lands in the same frame.
@@ -73,6 +74,7 @@ Halo handles `halo://` links, so Shortcuts (an **Open URLs** action), Siri (run 
 | `halo://intensity/40` | Party intensity 0–100 |
 | `halo://energy/<on\|off>` | Follow song energy |
 | `halo://snare/<on\|off>`, `halo://hats/<on\|off>` | Snare/clap accents, hi-hat shimmer |
+| `halo://dynamics/50` | Brightness follows music, 0–100 |
 | `halo://synctest`, `halo://synctest/off` | Sync test: kicks + white flashes for lining up Fine-tune |
 | `halo://palette/<rainbow\|fire\|ocean\|neon\|sunset\|forest\|ice\|custom>` | Music color palette |
 | `halo://sensitivity/65`, `halo://smoothness/35` | Tuning for the current music style |
@@ -112,7 +114,7 @@ The strip's controller is a Robobloq USB HID device, `1a86:fe07`, using the vend
 | `0x85 03 07` | Microphone effect Circles (not used by Halo). Other codes tried (00–0D, 10–13) do nothing; the controller's ♫ button cycles its other sound effects. |
 | `0x98 e l` | (Vendor app, not used by Halo.) "Computer rhythm": drives sound effect `e` with level `l` (0–100), sent every 40 ms from Windows' audio peak meter. Needs firmware ≥ 1.8.2. |
 | `0x86` | Color ranges |
-| `0x87 b` | Brightness (1–255) |
+| `0x87 b` | Brightness (1–255). Only affects the built-in effects, not colors sent with `0x80`/`0x86`, so Halo dims those itself. |
 | `0x8A s` | Effect speed (0 = fast, 100 = slow) |
 | `0x93 00` | Stops the controller from asking the PC to open the vendor URL. It also clears a stalled parser: after a half-written or bad packet, the controller ignores frames until it gets this. Halo sends it on every mode change and every 3 s while syncing. |
 | `0x97` | Off (also send black) |
